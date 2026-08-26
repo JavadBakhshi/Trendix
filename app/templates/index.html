@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CryptoAnalyzer</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/css/style.css" />
+  <script src="/static/js/lightweight-charts.standalone.production.js"></script>
+</head>
+<body>
+  <div id="app" class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 32 32" fill="none">
+            <rect width="32" height="32" rx="9" fill="url(#g)"/>
+            <path d="M6 20l5-6 4 3 7-9 4 4" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+            <defs><linearGradient id="g" x1="0" y1="0" x2="32" y2="32"><stop stop-color="#6d7cff"/><stop offset="1" stop-color="#8b5cf6"/></linearGradient></defs>
+          </svg>
+        </span>
+        <span class="brand-name">CryptoAnalyzer</span>
+      </div>
+
+      <nav class="nav">
+        <button class="nav-item active" data-page="dashboard">
+          <svg viewBox="0 0 24 24"><rect x="3" y="3" width="8" height="8" rx="2"/><rect x="13" y="3" width="8" height="5" rx="2"/><rect x="13" y="10" width="8" height="11" rx="2"/><rect x="3" y="13" width="8" height="8" rx="2"/></svg>
+          داشبورد
+        </button>
+        <button class="nav-item" data-page="markets">
+          <svg viewBox="0 0 24 24"><path d="M4 19V5M4 19h16"/><path d="M8 16v-5M12 16V8M16 16v-3"/></svg>
+          بازارها
+        </button>
+        <button class="nav-item" data-page="alerts">
+          <svg viewBox="0 0 24 24"><path d="M12 4a6 6 0 016 6c0 7 2 7 2 7H4s2 0 2-7a6 6 0 016-6z"/><path d="M10 18a2 2 0 004 0"/></svg>
+          هشدار معامله
+        </button>
+        <button class="nav-item" data-page="outlook">
+          <svg viewBox="0 0 24 24"><path d="M5 5h14v14H5z"/><path d="M8 9h8M8 13h8M8 17h5"/></svg>
+          چشم‌انداز
+        </button>
+        <button class="nav-item" data-page="analysis">
+          <svg viewBox="0 0 24 24"><path d="M4 19l5-8 4 4 7-11"/><circle cx="20" cy="4" r="1.5" fill="currentColor" stroke="none"/></svg>
+          تحلیل
+        </button>
+        <button class="nav-item" data-page="charts">
+          <svg viewBox="0 0 24 24"><path d="M7 4v16M17 4v16M4 8h6M14 12h6M4 16h6M14 8h6"/></svg>
+          نمودارها
+        </button>
+        <button class="nav-item" data-page="news">
+          <svg viewBox="0 0 24 24"><path d="M4 5h12v14H4z"/><path d="M16 8h4v11a2 2 0 01-2 2H6"/><path d="M7 9h6M7 13h6M7 17h3"/></svg>
+          اخبار
+        </button>
+        <button class="nav-item" data-page="watchlist">
+          <svg viewBox="0 0 24 24"><path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 16.8 6.8 19.6l1-5.8L3.5 9.7l5.9-.9z"/></svg>
+          لیست پیگیری
+        </button>
+        <button class="nav-item" data-page="settings">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.3 1.8l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.7 1.7 0 00-1.8-.3 1.7 1.7 0 00-1 1.5V21a2 2 0 11-4 0v-.1a1.7 1.7 0 00-1-1.5 1.7 1.7 0 00-1.8.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.7 1.7 0 00.3-1.8 1.7 1.7 0 00-1.5-1H3a2 2 0 110-4h.1a1.7 1.7 0 001.5-1 1.7 1.7 0 00-.3-1.8l-.1-.1a2 2 0 112.8-2.8l.1.1a1.7 1.7 0 001.8.3H9a1.7 1.7 0 001-1.5V3a2 2 0 114 0v.1a1.7 1.7 0 001 1.5 1.7 1.7 0 001.8-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.7 1.7 0 00-.3 1.8V9c.3.6.9 1 1.5 1H21a2 2 0 110 4h-.1a1.7 1.7 0 00-1.5 1z"/></svg>
+          تنظیمات
+        </button>
+      </nav>
+
+      <div class="sidebar-foot">
+        <button class="nav-item" data-page="about">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 8h.01"/></svg>
+          درباره برنامه
+        </button>
+        <label class="theme-switch">
+          <span>
+            <svg viewBox="0 0 24 24"><path d="M21 14.5A8.5 8.5 0 1110.5 3 7 7 0 0021 14.5z"/></svg>
+            حالت تیره
+          </span>
+          <input id="themeToggle" type="checkbox" checked />
+          <i></i>
+        </label>
+      </div>
+    </aside>
+
+    <div class="workspace">
+      <div class="page active" id="page-dashboard">
+        <header class="dash-top">
+          <div class="pair-wrap">
+            <button class="pair-btn" id="pairBtn" type="button">
+              <img id="pairIcon" alt="" src="https://cdn.jsdelivr.net/gh/spothq/cryptocurrency-icons@master/128/color/btc.png" />
+              <span>
+                <strong id="pairTitle">Bitcoin / Tether</strong>
+                <small id="pairSymbol">BTC / USDT</small>
+              </span>
+              <svg class="chev" viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg>
+            </button>
+            <div class="pair-menu" id="pairMenu" hidden>
+              <input id="pairSearch" type="search" placeholder="جستجوی ارز، طلا، یورو، دلار..." autocomplete="off" />
+              <div id="pairList" class="pair-list"></div>
+            </div>
+          </div>
+          <div class="price-block">
+            <div class="live-price" id="livePrice">—</div>
+            <div class="live-change up" id="liveChange">—</div>
+          </div>
+          <div class="top-actions">
+            <button class="icon-btn" id="watchToggle" title="لیست پیگیری">
+              <svg viewBox="0 0 24 24"><path d="M12 3.5l2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 16.8 6.8 19.6l1-5.8L3.5 9.7l5.9-.9z"/></svg>
+            </button>
+            <button class="icon-btn" id="refreshBtn" title="به‌روزرسانی">
+              <svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 11-2.2-5.5M20 4v6h-6"/></svg>
+            </button>
+          </div>
+        </header>
+
+        <div class="tf-row" id="tfRow"></div>
+
+        <section class="chart-card">
+          <div class="chart-tools">
+            <div class="seg" id="chartType">
+              <button class="active" data-type="candles" title="کندل">
+                <svg viewBox="0 0 24 24"><path d="M8 4v16M16 4v16M5 8h6M13 11h6M5 16h6M13 8h6"/></svg>
+              </button>
+              <button data-type="line" title="خطی">
+                <svg viewBox="0 0 24 24"><path d="M4 16l5-6 4 3 7-8"/></svg>
+              </button>
+            </div>
+            <button class="icon-btn" id="fullscreenBtn" title="تمام‌صفحه">
+              <svg viewBox="0 0 24 24"><path d="M8 3H3v5M16 3h5v5M8 21H3v-5M21 16v5h-5"/></svg>
+            </button>
+          </div>
+          <div class="chart-stage" id="chartStage">
+            <div id="mainChart" class="chart-canvas"></div>
+            <div id="extraChart" class="chart-canvas extra" hidden></div>
+          </div>
+          <div class="ind-toggles" id="indToggles">
+            <button data-ind="sma" class="active">MA</button>
+            <button data-ind="ema">EMA</button>
+            <button data-ind="boll">BOLL</button>
+            <button data-ind="macd">MACD</button>
+            <button data-ind="rsi">RSI</button>
+            <button data-ind="volume" class="active">Volume</button>
+          </div>
+        </section>
+
+        <section class="pred-banner" id="predBanner">
+          <div class="pred-dir" data-dir="neutral">
+            <span id="predLabel">—</span>
+            <small id="predHorizon">پیش‌بینی</small>
+            <em id="predConfLevel"></em>
+          </div>
+          <div class="pred-meta">
+            <div><span>احتمال</span><strong id="predProb">—</strong></div>
+            <div><span>قیمت هدف</span><strong id="predTarget">—</strong></div>
+            <div><span>تغییر مورد انتظار</span><strong id="predChange">—</strong></div>
+            <div><span>ورود</span><strong id="predEntry">—</strong></div>
+            <div><span>حد ضرر</span><strong id="predSl">—</strong></div>
+            <div><span>اهداف</span><strong id="predTp">—</strong></div>
+          </div>
+          <div class="pred-chips" id="predChips"></div>
+          <div class="layer-bars" id="layerBars"></div>
+          <ul class="pred-reasons" id="predReasons"></ul>
+          <p class="pred-risks" id="predRisks"></p>
+          <p id="predSummary">در حال بارگذاری تحلیل...</p>
+        </section>
+
+        <section class="ta-card">
+          <h2>نمایش تحلیل تکنیکال</h2>
+          <div class="gauges" id="gauges"></div>
+        </section>
+      </div>
+
+      <div class="page" id="page-markets">
+        <header class="page-head">
+          <h1>بازارها</h1>
+          <input id="marketSearch" type="search" placeholder="جستجو در بازار..." />
+        </header>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>ارز</th>
+                <th>قیمت</th>
+                <th>۲۴ ساعت</th>
+                <th>حجم</th>
+                <th>ارزش بازار</th>
+              </tr>
+            </thead>
+            <tbody id="marketBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="page" id="page-alerts">
+        <header class="page-head">
+          <h1>هشدار خرید و فروش</h1>
+          <p class="muted">بهترین مورد الان بر اساس مدل ۱ ساعت + تأیید ۱۵ دقیقه</p>
+        </header>
+        <p class="alert-headline" id="alertHeadline">در حال اسکن بازار...</p>
+        <div class="alert-heroes" id="alertHeroes"></div>
+        <div class="alert-cols">
+          <section>
+            <h2>بخر</h2>
+            <div id="alertBuys"></div>
+          </section>
+          <section>
+            <h2>بفروش</h2>
+            <div id="alertSells"></div>
+          </section>
+        </div>
+        <section>
+          <h2 class="alert-wait-title">فعلاً صبر</h2>
+          <div id="alertWaits"></div>
+        </section>
+        <p class="muted" id="alertNote"></p>
+      </div>
+
+      <div class="page" id="page-outlook">
+        <header class="page-head">
+          <h1>چشم‌انداز بازار</h1>
+          <p class="muted" id="outlookPair">خلاصهٔ نوشتاری تحلیل در چند افق زمانی</p>
+        </header>
+        <article class="brief-hero" id="briefHero">
+          <p class="muted">در حال نوشتن خلاصه...</p>
+        </article>
+        <div class="brief-grid" id="briefGrid"></div>
+        <div class="brief-bottom">
+          <section class="brief-card" id="briefScenarios"></section>
+          <section class="brief-card" id="briefWatch"></section>
+        </div>
+      </div>
+
+      <div class="page" id="page-analysis">
+        <header class="page-head">
+          <h1>تحلیل چندبازه</h1>
+          <p class="muted" id="analysisPair">—</p>
+        </header>
+        <div class="consensus" id="consensusBox"></div>
+        <div class="tf-grid" id="tfGrid"></div>
+        <div class="reasons-card" id="reasonsCard"></div>
+      </div>
+
+      <div class="page" id="page-charts">
+        <header class="page-head">
+          <h1>نمودارها</h1>
+        </header>
+        <div class="chart-card large">
+          <div id="bigChart" class="chart-canvas tall"></div>
+        </div>
+      </div>
+
+      <div class="page" id="page-news">
+        <header class="page-head">
+          <h1>اخبار بازار</h1>
+        </header>
+        <div class="news-grid" id="newsGrid"></div>
+      </div>
+
+      <div class="page" id="page-watchlist">
+        <header class="page-head">
+          <h1>لیست پیگیری</h1>
+        </header>
+        <div id="watchGrid" class="watch-grid"></div>
+      </div>
+
+      <div class="page" id="page-settings">
+        <header class="page-head">
+          <h1>تنظیمات</h1>
+        </header>
+        <div class="settings-card">
+          <label>بازه به‌روزرسانی خودکار (ثانیه)
+            <select id="refreshInterval">
+              <option value="0">خاموش</option>
+              <option value="15">۱۵</option>
+              <option value="30" selected>۳۰</option>
+              <option value="60">۶۰</option>
+            </select>
+          </label>
+          <label class="check">
+            <input type="checkbox" id="showForecast" checked />
+            نمایش خط پیش‌بینی روی نمودار
+          </label>
+          <p class="hint">منبع داده هنگام اجرا به‌صورت خودکار بین بایننس، بای‌بیت و اوکی‌ایکس انتخاب می‌شود.</p>
+        </div>
+      </div>
+
+      <div class="page" id="page-about">
+        <header class="page-head">
+          <h1>درباره برنامه</h1>
+        </header>
+        <div class="about-card">
+          <h2>CryptoAnalyzer</h2>
+          <p>برنامه محلی تحلیل و پیش‌بینی ارز دیجیتال. داده‌های زنده از صرافی‌ها گرفته می‌شود و با ترکیب اندیکاتورهای تکنیکال (RSI، MACD، میانگین متحرک، بولینگر) و مدل رگرسیون Ridge روی بازده‌های اخیر، جهت احتمالی قیمت در بازه‌های ۵ دقیقه تا یک هفته برآورد می‌شود.</p>
+          <p class="warn">این ابزار آموزشی است و توصیه سرمایه‌گذاری نیست. بازار رمزارز پرریسک است.</p>
+        </div>
+      </div>
+    </div>
+
+    <aside class="rail" id="rail">
+      <section class="panel">
+        <h3>اطلاعات ارز</h3>
+        <div class="coin-hero">
+          <img id="railIcon" alt="" />
+          <div>
+            <strong id="railName">Bitcoin (BTC)</strong>
+            <small id="railNameFa">بیت‌کوین</small>
+          </div>
+        </div>
+        <div class="rail-price" id="railPrice">—</div>
+        <div class="rail-change" id="railChange">—</div>
+        <ul class="stats" id="statsList"></ul>
+      </section>
+      <section class="panel">
+        <h3>عملکرد</h3>
+        <ul class="perf" id="perfList"></ul>
+      </section>
+    </aside>
+  </div>
+
+  <div class="toast" id="toast" hidden></div>
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
