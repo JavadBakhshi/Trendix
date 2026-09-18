@@ -8,4 +8,6 @@ __pycache__/
 .env
 .cache/
 *.log
-.idea/
+data/
+*.jsonl
+.trendix/

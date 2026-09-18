@@ -1133,6 +1133,141 @@ async function tickAlertWatch() {
   alertWatchTimer = setTimeout(tickAlertWatch, delay);
 }
 
+async function loadAutotrade() {
+  if (!$("atStatusBox")) return;
+  $("atStatusBox").innerHTML = "<p class='muted'>در حال خواندن وضعیت...</p>";
+  try {
+    const data = await api("/api/autotrade/status");
+    const cfg = data.config || {};
+    if ($("atEnabled")) $("atEnabled").checked = !!cfg.enabled;
+    if ($("atLogin") && !$("atLogin").value) $("atLogin").value = cfg.login || "";
+    if ($("atServer")) $("atServer").value = cfg.server || "Alpari-MT5-Demo";
+    if ($("atPath") && cfg.terminal_path) $("atPath").value = cfg.terminal_path;
+    if ($("atMode")) $("atMode").value = cfg.mode || "intraday";
+    if ($("atRisk")) $("atRisk").value = cfg.risk_percent ?? 0.5;
+    if ($("atMaxPos")) $("atMaxPos").value = cfg.max_positions ?? 3;
+    if ($("atMinOdds")) $("atMinOdds").value = cfg.min_odds ?? 50;
+    const acc = data.account || (data.connection && data.connection.account);
+    const lines = [
+      `<p><b>کتابخانه MT5:</b> ${data.mt5_library ? "نصب است" : "نیست (روی این سیستم معامله اجرا نمی‌شود)"}</p>`,
+      `<p><b>ذخیره رمز:</b> ${cfg.has_password ? "بله (محلی)" : "خیر"} · مسیر: <code>${cfg.store_path || "—"}</code></p>`,
+      data.note ? `<p class="muted">${data.note}</p>` : "",
+    ];
+    if (acc) {
+      lines.push(
+        `<p><b>اکانت:</b> ${acc.login} @ ${acc.server} · موجودی ${Number(acc.balance).toFixed(2)} ${acc.currency} · `
+        + `equity ${Number(acc.equity).toFixed(2)} · سود شناور ${Number(acc.profit).toFixed(2)}</p>`
+      );
+      lines.push(`<p><b>معامله مجاز:</b> ${acc.trade_allowed ? "بله" : "خیر"} · Expert: ${acc.trade_expert ? "بله" : "خیر"}</p>`);
+    } else if (data.connection && data.connection.error) {
+      lines.push(`<p class="warn">${data.connection.error}</p>`);
+    }
+    $("atStatusBox").innerHTML = lines.join("");
+    renderAtPositions(data.open_positions || []);
+    renderAtDeals(data.deals || []);
+    renderAtLog(data.log || []);
+  } catch (err) {
+    $("atStatusBox").innerHTML = `<p class="warn">${err.message}</p>`;
+  }
+}
+
+function renderAtPositions(rows) {
+  const el = $("atPositions");
+  if (!el) return;
+  if (!rows.length) {
+    el.innerHTML = "<p class='muted'>پوزیشن بازی از Trendix نیست.</p>";
+    return;
+  }
+  el.innerHTML = `<table class="autotrade-table"><thead><tr>
+    <th>تیکت</th><th>نماد</th><th>جهت</th><th>حجم</th><th>ورود</th><th>سود</th><th>سواپ</th>
+  </tr></thead><tbody>${rows.map((p) => `<tr>
+    <td>${p.ticket}</td><td>${p.symbol}</td><td>${p.type}</td><td>${p.volume}</td>
+    <td>${p.price_open}</td><td class="${p.profit >= 0 ? "up" : "down"}">${Number(p.profit).toFixed(2)}</td>
+    <td>${Number(p.swap).toFixed(2)}</td>
+  </tr>`).join("")}</tbody></table>`;
+}
+
+function renderAtDeals(rows) {
+  const el = $("atDeals");
+  if (!el) return;
+  if (!rows.length) {
+    el.innerHTML = "<p class='muted'>هنوز معامله‌ای با magic ترندیکس نیست. در دمو، کمیسیون ممکن است صفر و اسپرد در قیمت باشد.</p>";
+    return;
+  }
+  el.innerHTML = `<table class="autotrade-table"><thead><tr>
+    <th>زمان</th><th>نماد</th><th>نوع</th><th>حجم</th><th>قیمت</th><th>سود</th><th>کمیسیون</th><th>سواپ</th>
+  </tr></thead><tbody>${rows.map((d) => {
+    const t = d.time ? new Date(d.time * 1000).toLocaleString("fa-IR") : "—";
+    return `<tr>
+      <td>${t}</td><td>${d.symbol}</td><td>${d.type}</td><td>${d.volume}</td><td>${d.price}</td>
+      <td class="${Number(d.profit) >= 0 ? "up" : "down"}">${Number(d.profit).toFixed(2)}</td>
+      <td>${Number(d.commission).toFixed(2)}</td><td>${Number(d.swap).toFixed(2)}</td>
+    </tr>`;
+  }).join("")}</tbody></table>`;
+}
+
+function renderAtLog(rows) {
+  const el = $("atLog");
+  if (!el) return;
+  if (!rows.length) {
+    el.innerHTML = "<p class='muted'>لاگ خالی است.</p>";
+    return;
+  }
+  el.innerHTML = `<table class="autotrade-table"><thead><tr>
+    <th>زمان</th><th>نماد</th><th>جهت</th><th>لات</th><th>نتیجه</th>
+  </tr></thead><tbody>${rows.map((r) => {
+    const t = r.ts ? new Date(r.ts * 1000).toLocaleString("fa-IR") : "—";
+    const ok = r.result && r.result.ok;
+    return `<tr>
+      <td>${t}</td><td>${r.mt_symbol || r.trendix}</td><td>${r.side}</td><td>${r.lot ?? "—"}</td>
+      <td class="${ok ? "up" : "down"}">${ok ? "OK" : (r.result && r.result.error) || "—"}</td>
+    </tr>`;
+  }).join("")}</tbody></table>`;
+}
+
+async function saveAutotradeConfig() {
+  const payload = {
+    enabled: !!($("atEnabled") && $("atEnabled").checked),
+    login: ($("atLogin") && $("atLogin").value.trim()) || "",
+    password: ($("atPassword") && $("atPassword").value) || "",
+    server: ($("atServer") && $("atServer").value.trim()) || "Alpari-MT5-Demo",
+    terminal_path: ($("atPath") && $("atPath").value.trim()) || "",
+    mode: ($("atMode") && $("atMode").value) || "intraday",
+    risk_percent: Number($("atRisk") && $("atRisk").value) || 0.5,
+    max_positions: Number($("atMaxPos") && $("atMaxPos").value) || 3,
+    min_odds: Number($("atMinOdds") && $("atMinOdds").value) || 50,
+  };
+  const res = await fetch("/api/autotrade/config", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.detail || "ذخیره نشد");
+  if ($("atPassword")) $("atPassword").value = "";
+  toast("تنظیمات ذخیره شد");
+  await loadAutotrade();
+}
+
+async function testAutotrade() {
+  toast("در حال تست اتصال...");
+  const res = await fetch("/api/autotrade/test", { method: "POST" });
+  const body = await res.json().catch(() => ({}));
+  if (body.ok) toast(`وصل شد · equity ${(body.account && body.account.equity) || "—"}`);
+  else toast(body.error || "اتصال ناموفق");
+  await loadAutotrade();
+}
+
+async function runAutotradeOnce() {
+  toast("یک دور اسکن و معامله...");
+  const res = await fetch("/api/autotrade/run", { method: "POST" });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.detail || "اجرا نشد");
+  const n = (body.placed || []).length;
+  toast(body.ok ? `انجام شد · معاملات جدید: ${n}` : (body.error || body.reason || "رد شد"));
+  await loadAutotrade();
+}
+
 async function loadBacktest() {
   const ticker = (state.analysis && state.analysis.ticker) || {};
   if ($("btPair")) $("btPair").textContent = ticker.name_fa ? `${ticker.name_fa} · ${state.interval}` : state.symbol;
@@ -1403,6 +1538,7 @@ function goPage(page) {
   if (page === "news") loadNews();
   if (page === "watchlist") loadWatchlist();
   if (page === "backtest") loadBacktest();
+  if (page === "autotrade") loadAutotrade();
 }
 
 async function tickPrice() {
@@ -1491,6 +1627,10 @@ function bind() {
   };
   if ($("alertArmBtn")) $("alertArmBtn").onclick = toggleAlertArm;
   if ($("alertTestBtn")) $("alertTestBtn").onclick = testAlertSound;
+  if ($("atSaveBtn")) $("atSaveBtn").onclick = () => saveAutotradeConfig().catch((e) => toast(e.message));
+  if ($("atTestBtn")) $("atTestBtn").onclick = () => testAutotrade().catch((e) => toast(e.message));
+  if ($("atRunBtn")) $("atRunBtn").onclick = () => runAutotradeOnce().catch((e) => toast(e.message));
+  if ($("atRefreshBtn")) $("atRefreshBtn").onclick = () => loadAutotrade().catch((e) => toast(e.message));
   if ($("alertSoundOn")) {
     $("alertSoundOn").checked = state.alertSound;
     $("alertSoundOn").onchange = (e) => {

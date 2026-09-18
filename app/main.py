@@ -85,7 +85,20 @@ async def index():
 
 @app.get("/api/health")
 async def health():
-    source = None
+    # Liveness only — never probe exchanges here (proxy bootstrap can hang).
+    return {
+        "ok": True,
+        "source": market.source,
+        "proxy": bool(
+            os.environ.get("HTTPS_PROXY")
+            or os.environ.get("HTTP_PROXY")
+            or os.environ.get("ALL_PROXY")
+        ),
+    }
+
+
+@app.get("/api/ready")
+async def ready():
     try:
         source = await market.ensure_source()
     except Exception as exc:
@@ -294,6 +307,61 @@ async def markets():
 async def news():
     try:
         return await market.news()
+    except Exception as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
+@app.get("/api/autotrade/status")
+async def autotrade_status():
+    from app.trading.executor import status_bundle
+
+    try:
+        return jsonable(await status_bundle())
+    except Exception as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
+@app.post("/api/autotrade/config")
+async def autotrade_config(payload: dict):
+    """Save MT5 settings locally (password never returned in clear text)."""
+    from app.trading.secrets import save
+
+    allowed = {
+        "enabled", "login", "password", "server", "terminal_path",
+        "mode", "risk_percent", "max_positions", "min_odds", "cooldown_sec", "magic",
+    }
+    data = {k: payload[k] for k in allowed if k in payload}
+    if "risk_percent" in data:
+        data["risk_percent"] = float(max(0.1, min(3.0, float(data["risk_percent"]))))
+    if "max_positions" in data:
+        data["max_positions"] = int(max(1, min(8, int(data["max_positions"]))))
+    if "min_odds" in data:
+        data["min_odds"] = int(max(40, min(78, int(data["min_odds"]))))
+    if "cooldown_sec" in data:
+        data["cooldown_sec"] = int(max(60, min(3600, int(data["cooldown_sec"]))))
+    if "mode" in data and data["mode"] not in {"scalping", "intraday", "swing"}:
+        data["mode"] = "intraday"
+    return jsonable(save(data))
+
+
+@app.post("/api/autotrade/test")
+async def autotrade_test():
+    from app.trading.executor import connect_from_secrets
+    from app.trading import mt5_bridge
+
+    result = connect_from_secrets()
+    if result.get("ok"):
+        mt5_bridge.shutdown()
+    return jsonable(result)
+
+
+@app.post("/api/autotrade/run")
+async def autotrade_run():
+    """One scan→trade cycle (for manual trigger or local worker)."""
+    from app.trading.executor import run_once
+
+    try:
+        return jsonable(await run_once())
     except Exception as exc:
         raise HTTPException(503, str(exc)) from exc
 

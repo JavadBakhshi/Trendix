@@ -753,12 +753,32 @@ html[data-theme="light"] .rail { background: #fff; }
   font-size: 12px;
   color: var(--muted);
 }
-.alert-live {
+.autotrade-card label { display: block; margin-bottom: 10px; }
+.autotrade-card input[type="text"],
+.autotrade-card input[type="password"],
+.autotrade-card input[type="number"],
+.autotrade-card select {
   width: 100%;
-  margin: 0;
-  font-size: 12px;
-  color: var(--accent);
-  font-weight: 700;
+  margin-top: 6px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--bg-2);
+  color: var(--text);
+}
+.autotrade-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.autotrade-status {
+  margin: 14px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--card);
+}
+.autotrade-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.autotrade-table th, .autotrade-table td {
+  border-bottom: 1px solid var(--line);
+  padding: 8px 6px;
+  text-align: right;
 }
 .alert-headline { font-size: 18px; font-weight: 800; margin-bottom: 14px; }
 .alert-hero.hot { box-shadow: 0 0 0 2px rgba(234, 179, 8, 0.45); }
