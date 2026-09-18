@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/css/style.css?v=signal10" />
+  <link rel="stylesheet" href="/static/css/style.css?v=signal11" />
   <script src="/static/js/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
@@ -262,6 +262,7 @@
         </header>
         <div class="alert-arm">
           <button type="button" class="alert-arm-btn" id="alertArmBtn">فعال کردن هشدار صوتی</button>
+          <button type="button" class="alert-test-btn" id="alertTestBtn">تست صدا</button>
           <label class="alert-arm-check">
             <input type="checkbox" id="alertSoundOn" checked />
             صدا
@@ -277,7 +278,7 @@
             </select>
             بیشتر شد
           </label>
-          <p class="alert-arm-status" id="alertArmStatus">برای صدا، دکمه را بزن و این تب را باز نگه دار. اسکن خودکار است.</p>
+          <p class="alert-arm-status" id="alertArmStatus">برای صدا، دکمهٔ فعال‌سازی یا تست صدا را بزن و این تب را باز نگه دار.</p>
           <p class="alert-live" id="alertLive">آمادهٔ اسکن خودکار...</p>
         </div>
         <p class="alert-headline" id="alertHeadline">در حال اسکن بازار...</p>
@@ -424,6 +425,6 @@
   </div>
 
   <div class="toast" id="toast" hidden></div>
-  <script src="/static/js/app.js?v=signal10"></script>
+  <script src="/static/js/app.js?v=signal11"></script>
 </body>
 </html>

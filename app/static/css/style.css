@@ -722,6 +722,16 @@ html[data-theme="light"] .rail { background: #fff; }
   font-size: 13px;
 }
 .alert-arm-btn.on { background: var(--green); color: #052e16; }
+.alert-test-btn {
+  padding: 8px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--bg-2);
+  color: var(--text);
+  font-weight: 700;
+  font-size: 13px;
+  cursor: pointer;
+}
 .alert-arm-check, .alert-arm-field {
   display: flex;
   align-items: center;

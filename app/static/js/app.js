@@ -45,8 +45,46 @@ let lastPrice = null;
 let chartKey = "";
 let audioCtx = null;
 let alertArmed = localStorage.getItem("ca_alert_arm") === "1";
+let audioUnlocked = false;
 let lastAlertNotify = {};
 try { lastAlertNotify = JSON.parse(sessionStorage.getItem("ca_alert_fired") || "{}"); } catch (_) { lastAlertNotify = {}; }
+
+/** Tiny WAV beep as HTMLAudio fallback when WebAudio is blocked. */
+const ALERT_BEEP_WAV = (() => {
+  const sampleRate = 22050;
+  const duration = 0.45;
+  const n = Math.floor(sampleRate * duration);
+  const dataSize = n * 2;
+  const buf = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(buf);
+  const writeStr = (off, s) => { for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i)); };
+  writeStr(0, "RIFF");
+  view.setUint32(4, 36 + dataSize, true);
+  writeStr(8, "WAVE");
+  writeStr(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeStr(36, "data");
+  view.setUint32(40, dataSize, true);
+  const freqs = [880, 1175, 1568];
+  for (let i = 0; i < n; i++) {
+    const t = i / sampleRate;
+    const seg = Math.min(2, Math.floor(t / 0.14));
+    const local = t - seg * 0.14;
+    const env = local < 0.02 ? local / 0.02 : Math.max(0, 1 - (local - 0.02) / 0.12);
+    const sample = Math.sin(2 * Math.PI * freqs[seg] * t) * env * 0.55;
+    view.setInt16(44 + i * 2, sample * 32767, true);
+  }
+  const bytes = new Uint8Array(buf);
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return "data:audio/wav;base64," + btoa(binary);
+})();
 
 const $ = (id) => document.getElementById(id);
 
@@ -900,30 +938,34 @@ function collectHotAlerts(data) {
   );
 }
 
-function processHotAlerts(data) {
+function processHotAlerts(data, opts) {
   const hot = collectHotAlerts(data);
+  const force = !!(opts && opts.force);
   const dot = $("alertNavDot");
   if (dot) dot.hidden = !hot.length;
   syncAlertArmUi(hot);
   if (document.hidden && hot.length) document.title = "🔔 هشدار معامله";
   else if (!document.hidden) document.title = PAGE_TITLE;
-  if (!alertArmed || !hot.length) return;
+  if (!alertArmed || !state.alertSound || !hot.length) return;
   const now = Date.now();
   const due = [];
   hot.forEach((a) => {
     const key = `${a.symbol}:${a.action}`;
+    if (force) delete lastAlertNotify[key];
     const prev = lastAlertNotify[key];
     const pct = Number(a.success_pct || 0);
-    if (prev && now - prev.at < 8 * 60 * 1000 && pct < prev.pct + 8) return;
+    if (prev && now - prev.at < 3 * 60 * 1000 && pct < prev.pct + 5) return;
     due.push(a);
   });
   due.sort((a, b) => Number(b.success_pct) - Number(a.success_pct));
-  due.slice(0, 2).forEach((a) => {
+  if (!due.length) return;
+  // One clear beep burst, then notifications.
+  playAlertSound();
+  due.slice(0, 3).forEach((a) => {
     lastAlertNotify[`${a.symbol}:${a.action}`] = { at: now, pct: Number(a.success_pct || 0) };
-    if (state.alertSound) playAlertSound();
     showTradeNotification(a);
   });
-  if (due.length) sessionStorage.setItem("ca_alert_fired", JSON.stringify(lastAlertNotify));
+  sessionStorage.setItem("ca_alert_fired", JSON.stringify(lastAlertNotify));
 }
 
 function ensureAudio() {
@@ -933,24 +975,102 @@ function ensureAudio() {
   return audioCtx;
 }
 
-function playAlertSound() {
+async function unlockAudio() {
+  audioUnlocked = true;
   const ctx = ensureAudio();
-  if (!ctx) return;
-  ctx.resume().catch(() => {});
-  const now = ctx.currentTime;
+  if (ctx && ctx.state === "suspended") {
+    try { await ctx.resume(); } catch (_) { /* fallback below */ }
+  }
+  return ctx;
+}
+
+async function playWebBeep() {
+  const ctx = await unlockAudio();
+  if (!ctx) throw new Error("no-webaudio");
+  if (ctx.state === "suspended") await ctx.resume();
+  const now = ctx.currentTime + 0.02;
   [880, 1175, 1568].forEach((freq, i) => {
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     osc.type = "sine";
-    osc.frequency.value = freq;
-    const t = now + i * 0.14;
-    gain.gain.setValueAtTime(0.0001, t);
-    gain.gain.exponentialRampToValueAtTime(0.16, t + 0.02);
-    gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.32);
+    const t0 = now + i * 0.15;
+    osc.frequency.setValueAtTime(freq, t0);
+    gain.gain.setValueAtTime(0.001, t0);
+    gain.gain.linearRampToValueAtTime(0.28, t0 + 0.025);
+    gain.gain.linearRampToValueAtTime(0.001, t0 + 0.28);
     osc.connect(gain).connect(ctx.destination);
-    osc.start(t);
-    osc.stop(t + 0.34);
+    osc.start(t0);
+    osc.stop(t0 + 0.3);
   });
+}
+
+function playHtmlBeep() {
+  return new Promise((resolve, reject) => {
+    try {
+      const audio = new Audio(ALERT_BEEP_WAV);
+      audio.volume = 0.85;
+      audio.onended = () => resolve(true);
+      audio.onerror = () => reject(new Error("html-audio-fail"));
+      const p = audio.play();
+      if (p && p.then) p.then(() => {}).catch(reject);
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
+async function playAlertSound() {
+  try {
+    await playWebBeep();
+    return true;
+  } catch (_) {
+    try {
+      await playHtmlBeep();
+      return true;
+    } catch (err2) {
+      console.warn("alert sound blocked", err2);
+      toast("مرورگر صدا را مسدود کرد — روی «تست صدا» یا فعال‌سازی کلیک کن");
+      return false;
+    }
+  }
+}
+
+async function testAlertSound() {
+  state.alertSound = true;
+  if ($("alertSoundOn")) $("alertSoundOn").checked = true;
+  localStorage.setItem("ca_alert_sound", "1");
+  const ok = await playAlertSound();
+  if (ok) toast("اگر شنیدی، صدا آماده است");
+}
+
+async function toggleAlertArm() {
+  if (alertArmed) {
+    alertArmed = false;
+    localStorage.setItem("ca_alert_arm", "0");
+    syncAlertArmUi();
+    toast("هشدار صوتی خاموش شد");
+    return;
+  }
+  const ok = await playAlertSound();
+  if ("Notification" in window && Notification.permission !== "granted") {
+    try {
+      const perm = await Notification.requestPermission();
+      if (perm !== "granted") toast("نوتیفیکیشن سیستم فعال نشد؛ صدا روی همین تب کار می‌کند.");
+    } catch (_) { /* ignore */ }
+  }
+  if (!ok) {
+    syncAlertArmUi();
+    return;
+  }
+  alertArmed = true;
+  localStorage.setItem("ca_alert_arm", "1");
+  lastAlertNotify = {};
+  sessionStorage.removeItem("ca_alert_fired");
+  syncAlertArmUi();
+  toast("هشدار صوتی فعال شد");
+  try {
+    await loadAlerts({ silent: true });
+  } catch (_) { /* next poll */ }
 }
 
 function showTradeNotification(a) {
@@ -981,27 +1101,6 @@ function showTradeNotification(a) {
   };
 }
 
-async function toggleAlertArm() {
-  if (alertArmed) {
-    alertArmed = false;
-    localStorage.setItem("ca_alert_arm", "0");
-    syncAlertArmUi();
-    toast("هشدار صوتی خاموش شد");
-    return;
-  }
-  const ctx = ensureAudio();
-  if (ctx) await ctx.resume().catch(() => {});
-  playAlertSound();
-  if ("Notification" in window && Notification.permission !== "granted") {
-    const perm = await Notification.requestPermission();
-    if (perm !== "granted") toast("نوتیفیکیشن سیستم فعال نشد؛ صدا روی همین تب کار می‌کند.");
-  }
-  alertArmed = true;
-  localStorage.setItem("ca_alert_arm", "1");
-  syncAlertArmUi();
-  loadAlerts({ silent: true });
-}
-
 function syncAlertArmUi(hot) {
   const btn = $("alertArmBtn");
   if (btn) {
@@ -1012,14 +1111,18 @@ function syncAlertArmUi(hot) {
   if (!status) return;
   const min = state.alertMinOdds || 50;
   if (!alertArmed) {
-    status.textContent = "صدا خاموش است. دکمه را بزن تا برای پیشنهادهای فعال بوق بزند.";
+    status.textContent = "صدا خاموش است. «فعال کردن هشدار صوتی» یا «تست صدا» را بزن.";
+    return;
+  }
+  if (!state.alertSound) {
+    status.textContent = "هشدار روشن است ولی تیک «صدا» خاموش است.";
     return;
   }
   if (hot && hot.length) {
     status.textContent = "آمادهٔ پخش: " + hot.map((a) => `${a.name_fa} ${a.success_pct}٪ ${a.action === "buy" ? "بخر" : "بفروش"}`).join(" · ");
     return;
   }
-  status.textContent = `هشدار صوتی روشن است — منتظر پیشنهاد فعال با احتمال ≥ ${min}٪`;
+  status.textContent = `صدا فعال است — الان پیشنهاد فعالی ≥ ${min}٪ نیست؛ با آمدن پیشنهاد بوق می‌زند.`;
 }
 
 async function tickAlertWatch() {
@@ -1387,11 +1490,13 @@ function bind() {
     scheduleRefresh();
   };
   if ($("alertArmBtn")) $("alertArmBtn").onclick = toggleAlertArm;
+  if ($("alertTestBtn")) $("alertTestBtn").onclick = testAlertSound;
   if ($("alertSoundOn")) {
     $("alertSoundOn").checked = state.alertSound;
     $("alertSoundOn").onchange = (e) => {
       state.alertSound = e.target.checked;
       localStorage.setItem("ca_alert_sound", e.target.checked ? "1" : "0");
+      if (e.target.checked) testAlertSound();
     };
   }
   if ($("alertOddsMin")) {
@@ -1418,9 +1523,13 @@ function bind() {
   }
   document.addEventListener("click", (e) => { handleMtClick(e); });
   if ($("mtCopyAll")) $("mtCopyAll").onclick = () => copyText(mtCopyText());
-  document.addEventListener("click", () => { if (alertArmed) ensureAudio()?.resume?.(); }, { once: true });
+  document.addEventListener("click", () => { if (alertArmed || audioUnlocked) unlockAudio(); });
+  document.addEventListener("keydown", () => { if (alertArmed || audioUnlocked) unlockAudio(); });
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) document.title = PAGE_TITLE;
+    if (!document.hidden) {
+      document.title = PAGE_TITLE;
+      if (alertArmed) unlockAudio();
+    }
   });
   window.addEventListener("resize", resizeCharts);
   document.addEventListener("fullscreenchange", () => {
