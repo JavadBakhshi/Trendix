@@ -15,14 +15,20 @@ from app.data.market import market
 DEFAULT_UNIVERSE = [
     "XAUUSD",
     "EURUSD",
+    "GBPUSD",
+    "USDJPY",
+    "AUDUSD",
+    "USDCAD",
+    "USDCHF",
+    "NZDUSD",
+    "EURJPY",
+    "GBPJPY",
+    "EURGBP",
     "DXY",
     "BTCUSDT",
     "ETHUSDT",
-    "BNBUSDT",
     "SOLUSDT",
     "XRPUSDT",
-    "ADAUSDT",
-    "DOGEUSDT",
 ]
 
 # Full predict only on signal TFs. Context TFs stay lean for speed.
@@ -30,8 +36,9 @@ PRIMARY_INTERVALS = ["1h", "15m", "5m"]
 LEAN_INTERVALS = ["1d", "3h", "30m"]
 ALL_INTERVALS = ["1d", "3h", "1h", "30m", "15m", "5m"]
 CONTEXT_INTERVALS = ["1d", "3h", "1h"]
-ALERT_TIERS = {"high_conviction", "strong"}
-_SEM = asyncio.Semaphore(8)
+# Moderate+edge is actionable; high/strong preferred in ranking.
+ALERT_TIERS = {"high_conviction", "strong", "moderate"}
+_SEM = asyncio.Semaphore(6)
 _SCAN_CACHE: dict = {"at": 0.0, "key": "", "rows": None, "refreshing": False}
 _SCAN_TTL = 40.0
 _STALE_TTL = 120.0
@@ -132,7 +139,28 @@ def _assemble(scored: list[dict], min_odds: int, now: float) -> dict:
         news = item.get("news_risk") or "low"
         quality = item.get("quality") or "no_trade"
 
-        # Live alert only: real setup + OOS edge + quality tier + no HTF conflict.
+        # Cautious directional watch→alert: edge exists, HTF lean clear, no live trigger yet.
+        if action not in {"buy", "sell"} and edge_nearby and success >= min_odds and news != "high":
+            htf = item.get("context_bias") if item.get("context_bias") in {"buy", "sell"} else None
+            ltf = item.get("lean") if item.get("lean") in {"buy", "sell"} else None
+            soft = htf or ltf
+            if soft in {"buy", "sell"}:
+                item["action"] = soft
+                item["status"] = "alert"
+                item["quality"] = "moderate"
+                item["quality_fa"] = "قابل پیشنهاد (نزدیک ورود)"
+                item["strength"] = item["quality_fa"]
+                item["command"] = f"{'🟢 BUY' if soft == 'buy' else '🔴 SELL'}  {item.get('mt_symbol')}"
+                note = ""
+                if htf and ltf and htf != ltf:
+                    note = f" · کوتاه‌مدت متمایل به {DIR_FA.get(ltf)}"
+                item["detail"] = (
+                    f"لبه آماری نزدیک است · جهت {DIR_FA.get(soft)} از بافت بالاتر "
+                    f"· تریگر دقیق هنوز نیست · احتمال {success}٪{note}"
+                )
+                live.append(item)
+                continue
+
         if (
             action in {"buy", "sell"}
             and has_edge
@@ -145,7 +173,15 @@ def _assemble(scored: list[dict], min_odds: int, now: float) -> dict:
             item["quality_fa"] = TIER_FA.get(quality, quality)
             item["strength"] = item["quality_fa"]
             live.append(item)
-        elif action in {"buy", "sell"} and has_edge and conflict and success >= min_odds:
+        elif action in {"buy", "sell"} and quality in ALERT_TIERS and news != "high" and success >= min_odds and not conflict:
+            # Setup without hard edge — still suggest as moderate so the board is usable.
+            item["status"] = "alert"
+            item["quality"] = "moderate"
+            item["quality_fa"] = "قابل پیشنهاد (لبه ضعیف‌تر)"
+            item["strength"] = item["quality_fa"]
+            item["detail"] = f"{item.get('detail')} · لبه آماری کامل نیست".strip(" ·")
+            live.append(item)
+        elif action in {"buy", "sell"} and conflict and success >= min_odds:
             item["status"] = "edge_wait"
             item["quality"] = "moderate"
             item["quality_fa"] = "تضاد بازه‌ها"
@@ -154,12 +190,8 @@ def _assemble(scored: list[dict], min_odds: int, now: float) -> dict:
         elif item.get("status") == "edge_wait" or (edge_nearby and action == "wait") or (has_edge and action == "wait"):
             item["status"] = "edge_wait"
             watched.append(item)
-        elif action in {"buy", "sell"} and success >= min_odds and not has_edge:
+        elif action in {"buy", "sell"} and success >= min_odds:
             item["status"] = "setup_no_edge"
-            watched.append(item)
-        elif action in {"buy", "sell"} and has_edge and quality not in ALERT_TIERS:
-            item["status"] = "edge_wait"
-            item["quality_fa"] = "نیاز به کیفیت بالاتر"
             watched.append(item)
 
     buys = sorted([r for r in live if r["action"] == "buy"], key=lambda x: (x.get("rank") or 0, x.get("success_pct") or 0), reverse=True)
@@ -194,8 +226,8 @@ def _assemble(scored: list[dict], min_odds: int, now: float) -> dict:
         "updated_at": int(now),
         "headline": _headline(best_buy, best_sell, scored, waits, min_odds),
         "disclaimer": (
-            f"فیلتر موفقیت ≥ {min_odds}٪. هشدار فعال فقط با ستاپ واقعی + لبه OOS + کیفیت قوی/قانع‌کننده "
-            "و بدون تضاد تایم بالاتر. پیشنهاد ساختگی از lean حذف شده است."
+            f"فیلتر موفقیت ≥ {min_odds}٪. اسکن شامل میجرها و کراس‌های مهم فارکس + طلا + کریپتو است. "
+            "هشدار فعال = ستاپ + لبه OOS؛ موارد نزدیک در دیده‌بان می‌آیند."
         ),
     }
 

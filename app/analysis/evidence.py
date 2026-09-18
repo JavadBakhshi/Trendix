@@ -195,28 +195,31 @@ def core_at(df: pd.DataFrame, i: int) -> dict:
     side = "wait"
     strategy = "none"
     score = 0.0
-    # Fresh trend entries only: pullback to EMA or MACD/ADX turn — not every bar in a trend.
+    # Fresh trend entries: pullback to EMA or MACD turn. Weak trends need cleaner trigger.
     near_ema = ema50 == ema50 and atr == atr and atr > 0 and abs(price - ema50) <= atr * 1.35
     macd_turn_up = macd_h == macd_h and prev_macd == prev_macd and prev_macd <= 0 < macd_h
     macd_turn_dn = macd_h == macd_h and prev_macd == prev_macd and prev_macd >= 0 > macd_h
-    adx_rising = adx == adx and prev_adx == prev_adx and adx >= 22 and adx >= prev_adx
-    if family == "trending" and regime != "weak_trend":
+    adx_rising = adx == adx and prev_adx == prev_adx and adx >= 20 and adx >= prev_adx
+    if family == "trending":
+        weak = regime == "weak_trend"
         long_ok = (
             bull and macd_h == macd_h and macd_h > 0 and ema50 == ema50 and price > ema50
             and not (rsi == rsi and rsi >= 72)
             and (near_ema or macd_turn_up)
-            and adx_rising
+            and (adx_rising or not weak)
+            and (not weak or near_ema)
         )
         short_ok = (
             bear and macd_h == macd_h and macd_h < 0 and ema50 == ema50 and price < ema50
             and not (rsi == rsi and rsi <= 28)
             and (near_ema or macd_turn_dn)
-            and adx_rising
+            and (adx_rising or not weak)
+            and (not weak or near_ema)
         )
         if long_ok:
-            side, strategy, score = "buy", "trend_follow", min(48.0, 20 + (adx - 20) * 0.85)
+            side, strategy, score = "buy", "trend_follow", min(48.0, 18 + (adx - 18) * 0.85)
         elif short_ok:
-            side, strategy, score = "sell", "trend_follow", min(48.0, 20 + (adx - 20) * 0.85)
+            side, strategy, score = "sell", "trend_follow", min(48.0, 18 + (adx - 18) * 0.85)
     elif family == "ranging":
         if bb_pct == bb_pct and rsi == rsi and bb_pct <= 0.15 and rsi <= 32:
             side, strategy, score = "buy", "mean_reversion", 24 + (32 - rsi) * 0.45
@@ -279,24 +282,25 @@ def quality_tier(
     if n < MIN_OOS_TRADES or ev <= MIN_EXPECTANCY_R or (pf is not None and pf < MIN_PROFIT_FACTOR):
         return "avoid", "اجتناب"
     high = (
-        ev >= 0.12
-        and n >= max(15, MIN_OOS_TRADES + 3)
-        and p >= 0.58
-        and agreement >= 0.55
+        ev >= 0.10
+        and n >= max(12, MIN_OOS_TRADES + 2)
+        and p >= 0.56
+        and agreement >= 0.50
         and layers_agree
         and news_level != "medium"
     )
     strong = (
-        ev >= max(0.05, MIN_EXPECTANCY_R)
+        ev >= max(0.03, MIN_EXPECTANCY_R)
         and n >= MIN_OOS_TRADES
-        and p >= 0.55
-        and agreement >= 0.42
+        and p >= 0.52
+        and agreement >= 0.35
     )
     if high:
         return "high_conviction", "قانع‌کننده"
     if strong:
         return "strong", "قوی"
-    return "moderate", "متوسط / دیده‌بان"
+    # With edge already proven above, moderate is still suggestible.
+    return "moderate", "قابل پیشنهاد"
 
 
 def calibrated_prob(trades: list[dict], side: str) -> tuple[float, int]:

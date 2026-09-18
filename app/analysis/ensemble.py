@@ -364,15 +364,17 @@ def _gate_action(final: float, core: dict, evidence: dict, news_level: str, mtf_
         return "wait", evidence.get("verdict") or "ستاپ آزمایش‌شده در این رژیم دیده نشد"
     if evidence.get("retired") or not evidence.get("has_edge"):
         return "wait", evidence.get("verdict") or "امید ریاضی خارج از نمونه پس از هزینه کافی نیست"
+    # Soft MTF: only block when HTF conflicts AND ensemble also fights the setup.
     if mtf_dir and mtf_dir != side:
-        return "wait", "تضاد با تایم‌فریم بالاتر — صبر تا هم‌جهتی"
-    if side == "buy" and final <= -22:
+        if (side == "buy" and final <= -8) or (side == "sell" and final >= 8):
+            return "wait", "تضاد تایم‌فریم بالاتر همراه با لایه‌های مخالف"
+    if side == "buy" and final <= -28:
         return "wait", "ستاپ هست اما لایه‌های دیگر خلاف جهت‌اند"
-    if side == "sell" and final >= 22:
+    if side == "sell" and final >= 28:
         return "wait", "ستاپ هست اما لایه‌های دیگر خلاف جهت‌اند"
     hit = ml.get("hit_rate")
     ml_score = float(ml.get("score") or 0)
-    if hit is not None and hit < 48 and abs(ml_score) >= 12:
+    if hit is not None and hit < 45 and abs(ml_score) >= 18:
         if side == "buy" and ml_score < 0:
             return "wait", "مدل آماری خلاف جهت خرید است"
         if side == "sell" and ml_score > 0:

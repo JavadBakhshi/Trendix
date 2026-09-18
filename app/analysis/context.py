@@ -141,10 +141,17 @@ def _currencies_for(symbol: str) -> set[str]:
     s = symbol.upper()
     mapping = {
         "EURUSD": {"EUR", "USD", "EMU", "United States", "European Monetary Union"},
-        "DXY": {"USD", "United States"},
-        "XAUUSD": {"USD", "United States"},
         "GBPUSD": {"GBP", "USD", "United Kingdom", "United States"},
         "USDJPY": {"USD", "JPY", "United States", "Japan"},
+        "AUDUSD": {"AUD", "USD", "Australia", "United States"},
+        "USDCAD": {"USD", "CAD", "United States", "Canada"},
+        "USDCHF": {"USD", "CHF", "United States", "Switzerland"},
+        "NZDUSD": {"NZD", "USD", "New Zealand", "United States"},
+        "EURJPY": {"EUR", "JPY", "EMU", "Japan", "European Monetary Union"},
+        "GBPJPY": {"GBP", "JPY", "United Kingdom", "Japan"},
+        "EURGBP": {"EUR", "GBP", "EMU", "United Kingdom", "European Monetary Union"},
+        "DXY": {"USD", "United States"},
+        "XAUUSD": {"USD", "United States"},
         "BTCUSDT": {"USD", "United States"},
         "ETHUSDT": {"USD", "United States"},
     }

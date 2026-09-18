@@ -11,7 +11,10 @@ def asset_class(symbol: str) -> str:
         return "gold"
     if s in {"DXY", "DXYUSD", "USDX"}:
         return "index"
-    if s in {"EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "USDCAD", "NZDUSD"}:
+    if s in {
+        "EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "USDCAD", "NZDUSD",
+        "EURJPY", "GBPJPY", "EURGBP", "EURCHF", "AUDJPY", "CADJPY",
+    }:
         return "fx"
     if s.endswith("USDT") or s.endswith("USDC"):
         return "crypto"

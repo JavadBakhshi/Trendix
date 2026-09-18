@@ -179,7 +179,10 @@ def analyze_session(interval: str, symbol: str) -> dict:
     else:
         session, session_fa = "off", "بعد از سشن آمریکا"
     # Forex majors prefer London/NY; crypto is 24h
-    is_fx = symbol in {"EURUSD", "DXY", "XAUUSD", "GBPUSD", "USDJPY"}
+    is_fx = symbol in {
+        "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "USDCHF", "NZDUSD",
+        "EURJPY", "GBPJPY", "EURGBP", "DXY", "XAUUSD",
+    }
     score = 0.0
     if is_fx and session in {"london", "overlap", "newyork"}:
         score = 6
