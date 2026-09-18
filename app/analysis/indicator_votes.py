@@ -63,17 +63,18 @@ def score_indicators(df: pd.DataFrame, regime: str) -> dict:
             }
         )
 
+    family = _family(regime)
     bb = _f(row.get("bb_pct"))
     vol_vote = 0.0
     if bb == bb:
-        if regime == "ranging":
+        if family == "ranging":
             vol_vote = 1 if bb <= 0.2 else -1 if bb >= 0.8 else 0
-        elif regime == "trending":
+        elif family == "trending":
             vol_vote = 0.4 if 0.55 <= bb <= 0.9 else -0.4 if 0.1 <= bb <= 0.45 else 0
 
-    if regime == "trending":
+    if family == "trending":
         score = 55 * trend_vote + 25 * momentum_vote + 20 * vol_vote
-    elif regime == "ranging":
+    elif family == "ranging":
         score = 20 * trend_vote + 35 * momentum_vote + 45 * vol_vote
     else:
         score = 40 * trend_vote + 30 * momentum_vote + 30 * vol_vote
@@ -84,6 +85,16 @@ def score_indicators(df: pd.DataFrame, regime: str) -> dict:
         "momentum_vote": round(momentum_vote, 2),
         "reasons": reasons,
     }
+
+
+def _family(regime: str) -> str:
+    if regime in {"strong_bull", "strong_bear", "weak_trend", "breakout", "trending"}:
+        return "trending"
+    if regime in {"range", "ranging", "mean_reversion"}:
+        return "ranging"
+    if regime in {"compression"}:
+        return "compression"
+    return "ranging"
 
 
 def _f(value) -> float:

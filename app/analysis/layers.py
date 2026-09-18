@@ -13,51 +13,56 @@ def analyze_regime(df: pd.DataFrame) -> dict:
     adx = _f(row.get("adx"))
     bb_width = _f(row.get("bb_width"))
     atr_pct = _f(row.get("atr_pct"))
+    plus_di = _f(row.get("plus_di"))
+    minus_di = _f(row.get("minus_di"))
     widths = df["bb_width"].dropna() if "bb_width" in df.columns else pd.Series(dtype=float)
     atrs = df["atr_pct"].dropna() if "atr_pct" in df.columns else pd.Series(dtype=float)
     bb_pctile = float((widths < bb_width).mean() * 100) if len(widths) > 10 and bb_width == bb_width else 50
     atr_pctile = float((atrs < atr_pct).mean() * 100) if len(atrs) > 10 and atr_pct == atr_pct else 50
+    rets = df["close"].pct_change().dropna()
+    ac = float(rets.tail(60).autocorr(lag=1) or 0) if len(rets) > 20 else 0.0
+    bull = plus_di == plus_di and minus_di == minus_di and plus_di > minus_di
+    bear = plus_di == plus_di and minus_di == minus_di and minus_di > plus_di
 
-    if adx == adx and adx >= 25:
-        regime = "trending"
-        regime_fa = "رونددار"
-    elif bb_pctile <= 25:
-        regime = "compression"
-        regime_fa = "فشردگی"
+    if adx == adx and adx >= 28 and bull:
+        regime, family, regime_fa = "strong_bull", "trending", "روند صعودی قوی"
+    elif adx == adx and adx >= 28 and bear:
+        regime, family, regime_fa = "strong_bear", "trending", "روند نزولی قوی"
+    elif adx == adx and adx >= 18:
+        regime, family, regime_fa = "weak_trend", "trending", "روند ضعیف"
+    elif bb_pctile <= 22:
+        regime, family, regime_fa = "compression", "compression", "فشردگی / آماده شکست"
+    elif ac < -0.08:
+        regime, family, regime_fa = "mean_reversion", "ranging", "محیط بازگشت به میانگین"
     else:
-        regime = "ranging"
-        regime_fa = "رنج"
+        regime, family, regime_fa = "range", "ranging", "رنج"
 
     if atr_pctile >= 80:
-        vol_reg = "high"
-        vol_fa = "بالا"
+        vol_reg, vol_fa = "high", "بالا"
     elif atr_pctile <= 25:
-        vol_reg = "low"
-        vol_fa = "پایین"
+        vol_reg, vol_fa = "low", "پایین"
     else:
-        vol_reg = "normal"
-        vol_fa = "متوسط"
+        vol_reg, vol_fa = "normal", "متوسط"
 
-    plus_di = _f(row.get("plus_di"))
-    minus_di = _f(row.get("minus_di"))
-    direction = "up" if plus_di > minus_di else "down" if minus_di > plus_di else "sideways"
+    direction = "up" if bull else "down" if bear else "sideways"
     score = 0.0
-    if regime == "trending":
-        score = 22 if direction == "up" else -22 if direction == "down" else 0
-    elif regime == "compression":
-        score = 0  # wait for breakout
-    else:
-        # ranging: fade extremes via bb_pct handled in indicators
-        score = 0
+    if regime == "strong_bull":
+        score = 22
+    elif regime == "strong_bear":
+        score = -22
+    elif regime == "weak_trend":
+        score = 8 if direction == "up" else -8 if direction == "down" else 0
     return {
         "regime": regime,
         "regime_fa": regime_fa,
+        "family": family,
         "volatility": vol_reg,
         "volatility_fa": vol_fa,
         "adx": None if adx != adx else round(adx, 1),
         "bb_width_percentile": round(bb_pctile, 1),
         "atr_percentile": round(atr_pctile, 1),
         "direction": direction,
+        "autocorr": round(ac, 3),
         "score": score,
         "reasons": [
             {"id": "regime", "text": f"رژیم بازار: {regime_fa} · نوسان {vol_fa}", "bias": "buy" if score > 0 else "sell" if score < 0 else "neutral"}

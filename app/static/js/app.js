@@ -8,24 +8,45 @@ const TIMEFRAMES = [
   { id: "1w", label: "۱ هفته" },
 ];
 
+function initialRefreshMs() {
+  const raw = localStorage.getItem("ca_refresh");
+  if (raw == null) return 8000;
+  const n = Number(raw);
+  if (n === 30000) return 8000;
+  return n;
+}
+
 const state = {
   symbol: localStorage.getItem("ca_symbol") || "BTCUSDT",
   interval: localStorage.getItem("ca_interval") || "5m",
+  pendingInterval: null,
   coins: [],
   analysis: null,
   chartType: "candles",
   indicators: { sma: true, ema: false, boll: false, macd: false, rsi: false, volume: true },
   watchlist: JSON.parse(localStorage.getItem("ca_watch") || "[]"),
   showForecast: localStorage.getItem("ca_forecast") !== "0",
-  refreshMs: Number(localStorage.getItem("ca_refresh") || 30000),
+  refreshMs: initialRefreshMs(),
   page: "dashboard",
+  alertSound: localStorage.getItem("ca_alert_sound") !== "0",
+  alertMinOdds: Number(localStorage.getItem("ca_alert_min") || 50),
 };
 
+const PAGE_TITLE = "CryptoAnalyzer";
 let mainChart, extraChart, bigChart;
 let candleSeries, lineSeries, volumeSeries, extraSeries;
 const overlaySeries = {};
 let forecastSeries = null;
-let timer = null;
+let priceTimer = null;
+let analysisTimer = null;
+let alertWatchTimer = null;
+let analysisSeq = 0;
+let lastPrice = null;
+let chartKey = "";
+let audioCtx = null;
+let alertArmed = localStorage.getItem("ca_alert_arm") === "1";
+let lastAlertNotify = {};
+try { lastAlertNotify = JSON.parse(sessionStorage.getItem("ca_alert_fired") || "{}"); } catch (_) { lastAlertNotify = {}; }
 
 const $ = (id) => document.getElementById(id);
 
@@ -37,7 +58,8 @@ function toast(msg) {
 }
 
 async function api(path) {
-  const res = await fetch(path);
+  const joiner = path.includes("?") ? "&" : "?";
+  const res = await fetch(`${path}${joiner}_=${Date.now()}`, { cache: "no-store" });
   if (!res.ok) {
     const body = await res.json().catch(() => ({ detail: res.statusText }));
     throw new Error(body.detail || "خطای سرور");
@@ -55,6 +77,117 @@ function formatPrice(n, ticker) {
   else if (abs >= 1) num = n.toLocaleString("en-US", { minimumFractionDigits: 4, maximumFractionDigits: 5 });
   else num = n.toLocaleString("en-US", { minimumFractionDigits: 5, maximumFractionDigits: 8 });
   return prefix + num;
+}
+
+function mtPrice(n) {
+  if (n == null || n === "" || Number.isNaN(Number(n))) return "";
+  const v = Number(n);
+  const abs = Math.abs(v);
+  if (abs >= 1000) return v.toFixed(2);
+  if (abs >= 50) return v.toFixed(3);
+  if (abs >= 1) return v.toFixed(5);
+  return v.toFixed(6);
+}
+
+function mtSymbol(symbol) {
+  if (!symbol) return "";
+  return symbol.endsWith("USDT") ? symbol.slice(0, -4) + "USD" : symbol;
+}
+
+function mtNumHtml(value) {
+  const txt = mtPrice(value);
+  if (!txt) return `<code class="mt-num">—</code>`;
+  return `<code class="mt-num" data-copy="${txt}">${txt}</code>`;
+}
+
+function mtOrderText(symbol, side, price, sl, tp) {
+  const p = mtPrice(price), s = mtPrice(sl), t = mtPrice(tp);
+  if (!p) return "";
+  return `${mtSymbol(symbol)}\n${side}\nPrice ${p}\nSL ${s}\nTP ${t}`;
+}
+
+function mtLevelsHtml(a, side) {
+  const buy = side !== "sell";
+  const price = buy ? (a.buy_at || a.entry) : (a.sell_at || a.entry);
+  const sl = buy ? (a.buy_sl || a.stop_loss) : (a.sell_sl || a.stop_loss);
+  const tp = buy ? (a.buy_tp || a.tp1) : (a.sell_tp || a.tp1);
+  const label = buy ? "Buy" : "Sell";
+  const p = mtPrice(price), s = mtPrice(sl), t = mtPrice(tp);
+  if (!p) return "";
+  const sym = a.mt_symbol || mtSymbol(a.symbol);
+  return `
+    <div class="mt-levels ${buy ? "buy" : "sell"}" data-mt-symbol="${sym}" data-mt-side="${label}" data-mt-price="${p}" data-mt-sl="${s}" data-mt-tp="${t}">
+      <div class="mt-levels-head">
+        <b>${sym}</b>
+        <span>${label}</span>
+        <button type="button" class="mt-copy-btn">کپی سفارش</button>
+      </div>
+      <div class="mt-levels-nums">
+        <span>Price ${mtNumHtml(price)}</span>
+        <span>SL ${mtNumHtml(sl)}</span>
+        <span>TP ${mtNumHtml(tp)}</span>
+      </div>
+    </div>`;
+}
+
+function setMtNum(id, value) {
+  const el = $(id);
+  if (!el) return;
+  const txt = mtPrice(value);
+  el.textContent = txt || "—";
+  el.dataset.copy = txt;
+}
+
+function fillMtCopy(plan) {
+  setMtNum("mtBuyAt", plan.buy_at);
+  setMtNum("mtBuySl", plan.buy_sl);
+  setMtNum("mtBuyTp", plan.buy_tp);
+  setMtNum("mtSellAt", plan.sell_at);
+  setMtNum("mtSellSl", plan.sell_sl);
+  setMtNum("mtSellTp", plan.sell_tp);
+  const pair = $("mtPair");
+  if (pair) {
+    const txt = mtSymbol(state.symbol);
+    pair.textContent = txt || "—";
+    pair.dataset.copy = txt;
+  }
+}
+
+function mtCopyText() {
+  const plan = (state.analysis && state.analysis.prediction && state.analysis.prediction.plan) || {};
+  return [
+    mtOrderText(state.symbol, "Buy", plan.buy_at, plan.buy_sl, plan.buy_tp),
+    mtOrderText(state.symbol, "Sell", plan.sell_at, plan.sell_sl, plan.sell_tp),
+  ].filter(Boolean).join("\n\n");
+}
+
+function handleMtClick(e) {
+  const btn = e.target.closest(".mt-copy-btn");
+  if (btn) {
+    e.preventDefault();
+    e.stopPropagation();
+    const box = btn.closest("[data-mt-price]");
+    if (box) copyText(mtOrderText(box.dataset.mtSymbol, box.dataset.mtSide, box.dataset.mtPrice, box.dataset.mtSl, box.dataset.mtTp));
+    return true;
+  }
+  const num = e.target.closest(".mt-num");
+  if (num && num.dataset.copy) {
+    e.preventDefault();
+    e.stopPropagation();
+    copyText(num.dataset.copy);
+    return true;
+  }
+  return false;
+}
+
+async function copyText(text) {
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    toast(text.includes("\n") ? "اعداد متاتریدر کپی شد" : ("کپی شد: " + text));
+  } catch (_) {
+    toast("کپی نشد؛ عدد را دستی انتخاب کن");
+  }
 }
 
 function formatCompact(n) {
@@ -123,14 +256,23 @@ function buildTimeframes() {
   TIMEFRAMES.forEach((tf) => {
     const b = document.createElement("button");
     b.textContent = tf.label;
-    b.className = tf.id === state.interval ? "active" : "";
-    b.onclick = () => {
-      state.interval = tf.id;
-      localStorage.setItem("ca_interval", tf.id);
-      buildTimeframes();
-      loadAnalysis();
-    };
+    const pending = state.pendingInterval === tf.id;
+    const active = tf.id === state.interval && !state.pendingInterval;
+    b.className = [active ? "active" : "", pending ? "pending" : ""].filter(Boolean).join(" ");
+    b.onclick = () => setTimeframe(tf.id);
     row.appendChild(b);
+  });
+}
+
+function setTimeframe(id) {
+  if (state.pendingInterval === id) return;
+  state.pendingInterval = id;
+  localStorage.setItem("ca_interval", id);
+  buildTimeframes();
+  const label = TIMEFRAMES.find((t) => t.id === id)?.label || id;
+  loadAnalysis({
+    reason: "interval",
+    message: `مدل در حال بررسی بازه ${label} است...`,
   });
 }
 
@@ -147,8 +289,23 @@ function renderPairButton(ticker) {
   }
 }
 
+function setLiveStatus(kind, text) {
+  const el = $("liveStatus");
+  if (!el) return;
+  el.className = "live-status " + (kind || "");
+  const span = el.querySelector("span");
+  if (span) span.textContent = text;
+}
+
 function renderPrices(ticker) {
-  $("livePrice").textContent = formatPrice(ticker.price, ticker);
+  const next = ticker.price;
+  $("livePrice").textContent = formatPrice(next, ticker);
+  if (lastPrice != null && next != null && next !== lastPrice) {
+    $("livePrice").classList.remove("tick-up", "tick-down");
+    $("livePrice").classList.add(next > lastPrice ? "tick-up" : "tick-down");
+    setTimeout(() => $("livePrice").classList.remove("tick-up", "tick-down"), 700);
+  }
+  lastPrice = next;
   $("liveChange").textContent = pctText(ticker.change_24h) + " (24H)";
   $("liveChange").className = "live-change " + pctClass(ticker.change_24h);
   $("railIcon").src = ticker.image || ticker.icon;
@@ -170,6 +327,15 @@ function renderPrices(ticker) {
     stats.push(["عرضه در گردش", formatQty(ticker.circulating_supply, ticker.base)]);
   }
   $("statsList").innerHTML = stats.map(([k, v]) => `<li><span>${k}</span><b>${v}</b></li>`).join("");
+  const received = Date.now() / 1000;
+  const asof = Number(ticker.as_of) || received;
+  const age = Math.max(0, received - asof);
+  let src = ticker.market_label || ticker.quote_source || "صرافی";
+  if (ticker.category === "macro") src = ticker.market_label || "بازار جهانی";
+  if (ticker.category !== "macro") src = "صرافی زنده";
+  if (state.pendingInterval) setLiveStatus("busy", "در حال تصمیم‌گیری...");
+  else if (age > 45) setLiveStatus("lag", `در حال همگام‌سازی با ${src}`);
+  else setLiveStatus("ok", `زنده · ${src}`);
 }
 
 function renderPerformance(perf) {
@@ -179,8 +345,87 @@ function renderPerformance(perf) {
   }).join("");
 }
 
+function addPlanLines(series, pred) {
+  const p = pred && pred.plan;
+  if (!series || !p) return;
+  const rows = [
+    [p.buy_at, "#22c55e", "بخر"],
+    [p.sell_at, "#ef4444", "بفروش"],
+  ];
+  if (p.action === "buy") {
+    rows.push([p.buy_sl, "#f97316", "حد ضرر"], [p.buy_tp, "#38bdf8", "هدف"]);
+  } else if (p.action === "sell") {
+    rows.push([p.sell_sl, "#f97316", "حد ضرر"], [p.sell_tp, "#38bdf8", "هدف"]);
+  }
+  rows.forEach(([price, color, title]) => {
+    if (!price) return;
+    try {
+      series.createPriceLine({
+        price,
+        color,
+        lineWidth: 2,
+        lineStyle: 2,
+        axisLabelVisible: true,
+        title,
+      });
+    } catch (_) { /* ignore */ }
+  });
+}
+
 function renderPrediction(pred) {
   const ticker = state.analysis && state.analysis.ticker;
+  const plan = pred.plan || {};
+  const action = plan.action || pred.direction || "wait";
+  const verb = action === "buy" ? "بخر" : action === "sell" ? "بفروش" : "بدون معامله";
+  if ($("signalVerb")) {
+    $("signalVerb").textContent = verb;
+    $("signalVerb").dataset.dir = action === "buy" || action === "sell" ? action : "wait";
+  }
+  if ($("signalNow")) $("signalNow").textContent = plan.now_text || pred.no_trade_reason || pred.horizon || "";
+  if ($("signalCmd")) $("signalCmd").textContent = plan.command || pred.summary || "";
+  if ($("signalQuality")) {
+    const q = pred.quality_fa || "";
+    const ev = pred.evidence || {};
+    const oos = ev.oos || {};
+    const bits = [
+      q ? `کیفیت: ${q}` : "",
+      pred.primary_strategy_fa ? `استراتژی: ${pred.primary_strategy_fa}` : "",
+      oos.expectancy != null ? `EV خارج‌نمونه: ${oos.expectancy}R` : "",
+      oos.trades != null ? `${oos.trades} معامله OOS` : "",
+      pred.holding_period ? `نگهداری: ${pred.holding_period}` : "",
+    ].filter(Boolean);
+    $("signalQuality").textContent = bits.join(" · ");
+  }
+  if ($("signalInvalid")) {
+    $("signalInvalid").textContent = pred.invalidation ? `ابطال: ${pred.invalidation}` : (pred.no_trade_reason || "");
+  }
+  const points = document.querySelector(".signal-points");
+  if (points) points.classList.toggle("is-watch", action === "wait");
+  const buySmall = document.querySelector(".point.buy small");
+  const sellSmall = document.querySelector(".point.sell small");
+  if (buySmall) buySmall.textContent = action === "wait" ? "سطح دیده‌بان خرید" : "از این نقطه بخر";
+  if (sellSmall) sellSmall.textContent = action === "wait" ? "سطح دیده‌بان فروش" : "از این نقطه بفروش";
+  if ($("buyAt")) $("buyAt").textContent = plan.buy_at ? formatPrice(plan.buy_at, ticker) : "—";
+  if ($("sellAt")) $("sellAt").textContent = plan.sell_at ? formatPrice(plan.sell_at, ticker) : "—";
+  if ($("buySl")) $("buySl").textContent = plan.buy_sl ? formatPrice(plan.buy_sl, ticker) : "—";
+  if ($("sellSl")) $("sellSl").textContent = plan.sell_sl ? formatPrice(plan.sell_sl, ticker) : "—";
+  if ($("buyTp")) $("buyTp").textContent = plan.buy_tp ? formatPrice(plan.buy_tp, ticker) : "—";
+  if ($("sellTp")) $("sellTp").textContent = plan.sell_tp ? formatPrice(plan.sell_tp, ticker) : "—";
+  if ($("buyOdds")) $("buyOdds").textContent = plan.buy_success != null ? plan.buy_success + "٪" : "—";
+  if ($("sellOdds")) $("sellOdds").textContent = plan.sell_success != null ? plan.sell_success + "٪" : "—";
+  if ($("signalOdds")) {
+    const odds = action === "wait" ? (pred.confidence != null ? pred.confidence : "—") : (plan.success_pct != null ? plan.success_pct : pred.probability);
+    $("signalOdds").textContent = (odds != null ? odds : "—") + "٪";
+  }
+  if ($("signalRR")) {
+    if (action === "wait") $("signalRR").textContent = "سیگنال فعال نیست";
+    else {
+      const rr = action === "sell" ? (plan.sell_rr || plan.min_rr) : (plan.buy_rr || plan.min_rr);
+      $("signalRR").textContent = `حداقل سود ${rr || 2} برابر حد ضرر`;
+    }
+  }
+  if ($("signalNote")) $("signalNote").textContent = plan.disclaimer || pred.disclaimer || "سیگنال آموزشی است؛ قطعی نیست.";
+  fillMtCopy(plan);
   $("predLabel").textContent = pred.label;
   $("predHorizon").textContent = pred.horizon;
   $("predConfLevel").textContent = pred.confidence_fa ? `اطمینان ${pred.confidence_fa} (${pred.confidence}٪)` : "";
@@ -189,12 +434,13 @@ function renderPrediction(pred) {
   $("predChange").textContent = pctText(pred.change_pct);
   $("predChange").className = pctClass(pred.change_pct);
   const zone = pred.entry_zone || [];
-  const trade = pred.direction === "buy" || pred.direction === "sell";
-  $("predEntry").textContent = trade && zone.length === 2 ? `${formatPrice(zone[0], ticker)} – ${formatPrice(zone[1], ticker)}` : "—";
-  $("predSl").textContent = trade && pred.stop_loss ? formatPrice(pred.stop_loss, ticker) : "—";
-  $("predTp").textContent = trade && pred.tp1 ? `${formatPrice(pred.tp1, ticker)} / ${formatPrice(pred.tp2, ticker)}` : "—";
-  document.querySelector(".pred-dir").dataset.dir = pred.direction;
+  $("predEntry").textContent = zone.length === 2 ? `${formatPrice(zone[0], ticker)} – ${formatPrice(zone[1], ticker)}` : "—";
+  $("predSl").textContent = pred.stop_loss ? formatPrice(pred.stop_loss, ticker) : "—";
+  $("predTp").textContent = pred.tp1 ? `${formatPrice(pred.tp1, ticker)} / ${formatPrice(pred.tp2, ticker)}` : "—";
+  const dirEl = document.querySelector(".pred-dir");
+  if (dirEl) dirEl.dataset.dir = pred.direction;
   const chips = [];
+  if (pred.quality_fa) chips.push(pred.quality_fa);
   if (pred.regime_fa) chips.push(`رژیم: ${pred.regime_fa}`);
   if (pred.volatility_fa) chips.push(`نوسان: ${pred.volatility_fa}`);
   if (pred.session) chips.push(`سشن: ${pred.session}`);
@@ -202,6 +448,7 @@ function renderPrediction(pred) {
   if (pred.news_risk) chips.push(`ریسک خبر: ${pred.news_risk === "high" ? "بالا" : pred.news_risk === "medium" ? "متوسط" : "پایین"}`);
   if (pred.ml && pred.ml.hit_rate != null) chips.push(`ML hit-rate: ${pred.ml.hit_rate}٪`);
   if (pred.risk_reward) chips.push(`R/R ${pred.risk_reward}`);
+  if (pred.evidence && pred.evidence.has_edge === false) chips.push("بدون لبه OOS");
   $("predChips").innerHTML = chips.map((c) => `<i>${c}</i>`).join("");
   const layerNames = {
     structure: "ساختار",
@@ -298,12 +545,14 @@ function renderCharts(data) {
   if (state.chartType === "line") {
     lineSeries = mainChart.addLineSeries({ color: "#6d7cff", lineWidth: 2 });
     lineSeries.setData(data.candles.map((k) => ({ time: k.time, value: k.close })));
+    addPlanLines(lineSeries, data.prediction);
   } else {
     candleSeries = mainChart.addCandlestickSeries({
       upColor: c.up, downColor: c.down, borderVisible: false,
       wickUpColor: c.up, wickDownColor: c.down,
     });
     candleSeries.setData(data.candles);
+    addPlanLines(candleSeries, data.prediction);
   }
 
   if (state.indicators.volume) {
@@ -381,19 +630,129 @@ function renderBigChart(data) {
   bigChart.timeScale().fitContent();
 }
 
-async function loadAnalysis() {
+function refreshChartData(data) {
+  const candles = data.candles || [];
   try {
-    const data = await api(`/api/analysis?symbol=${state.symbol}&interval=${state.interval}`);
+    if (state.chartType === "line" && lineSeries) {
+      lineSeries.setData(candles.map((k) => ({ time: k.time, value: k.close })));
+    } else if (candleSeries) {
+      candleSeries.setData(candles);
+    } else {
+      renderCharts(data);
+      return;
+    }
+    if (volumeSeries && data.volume) volumeSeries.setData(data.volume);
+    const ov = data.overlays || {};
+    if (overlaySeries.sma) overlaySeries.sma.setData(ov.sma50 || []);
+    if (overlaySeries.ema) overlaySeries.ema.setData(ov.ema21 || []);
+    if (overlaySeries.bollU) overlaySeries.bollU.setData(ov.bb_upper || []);
+    if (overlaySeries.bollM) overlaySeries.bollM.setData(ov.bb_mid || []);
+    if (overlaySeries.bollL) overlaySeries.bollL.setData(ov.bb_lower || []);
+    if (forecastSeries && data.prediction?.forecast) forecastSeries.setData(data.prediction.forecast);
+    if (extraSeries) {
+      if (state.indicators.rsi) extraSeries.setData(ov.rsi || []);
+      else extraSeries.setData(ov.macd_hist || []);
+    }
+  } catch (_) {
+    renderCharts(data);
+  }
+}
+
+function showDecision(title, text) {
+  const el = $("decisionOverlay");
+  if (!el) return;
+  if ($("decisionTitle")) $("decisionTitle").textContent = title || "در حال تصمیم‌گیری";
+  if ($("decisionText")) $("decisionText").textContent = text || "اندیکاتورها و مدل در حال جمع‌بندی هستند...";
+  el.hidden = false;
+  $("predBanner")?.classList.add("is-thinking");
+  setLiveStatus("busy", title || "در حال تصمیم‌گیری");
+}
+
+function hideDecision() {
+  const el = $("decisionOverlay");
+  if (el) el.hidden = true;
+  $("predBanner")?.classList.remove("is-thinking");
+}
+
+function patchLastCandle(price) {
+  if (price == null || !state.analysis?.candles?.length) return;
+  const last = { ...state.analysis.candles[state.analysis.candles.length - 1] };
+  last.close = price;
+  last.high = Math.max(last.high, price);
+  last.low = Math.min(last.low, price);
+  state.analysis.candles[state.analysis.candles.length - 1] = last;
+  try {
+    if (candleSeries) candleSeries.update(last);
+    if (lineSeries) lineSeries.update({ time: last.time, value: last.close });
+  } catch (_) { /* ignore */ }
+}
+
+function syncChartToTicker(data) {
+  const price = data?.ticker?.price;
+  if (price == null || !data?.candles?.length) return data;
+  const last = { ...data.candles[data.candles.length - 1] };
+  last.close = price;
+  last.high = Math.max(last.high, price);
+  last.low = Math.min(last.low, price);
+  data.candles[data.candles.length - 1] = last;
+  return data;
+}
+
+function applyLivePrice(ticker) {
+  if (!ticker || (ticker.symbol && ticker.symbol !== state.symbol)) return;
+  renderPrices(ticker);
+  if (state.analysis) {
+    state.analysis.ticker = { ...state.analysis.ticker, ...ticker };
+    patchLastCandle(ticker.price);
+  }
+}
+
+async function loadAnalysis(opts = {}) {
+  const silent = !!opts.silent;
+  const reason = opts.reason || "refresh";
+  const interval = state.pendingInterval || state.interval;
+  const symbol = state.symbol;
+  const seq = ++analysisSeq;
+  if (!silent) {
+    const label = TIMEFRAMES.find((t) => t.id === interval)?.label || interval;
+    showDecision(
+      reason === "interval" ? "در حال تصمیم‌گیری" : "در حال به‌روزرسانی",
+      opts.message || `مدل در حال بررسی بازه ${label} است...`
+    );
+    $("refreshBtn")?.classList.add("spinning");
+  }
+  try {
+    const data = await api(`/api/analysis?symbol=${encodeURIComponent(symbol)}&interval=${interval}`);
+    if (seq !== analysisSeq || symbol !== state.symbol) return;
+    state.interval = interval;
+    if (state.pendingInterval === interval) state.pendingInterval = null;
     state.analysis = data;
+    lastPrice = data.ticker?.price ?? lastPrice;
     renderPairButton(data.ticker);
     renderPrices(data.ticker);
     renderPerformance(data.performance);
     renderPrediction(data.prediction);
     renderGauges(data.indicators);
-    renderCharts(data);
+    syncChartToTicker(data);
+    const key = `${symbol}:${interval}:${state.chartType}:${document.documentElement.getAttribute("data-theme")}`;
+    if (silent && key === chartKey && mainChart) refreshChartData(data);
+    else {
+      chartKey = key;
+      renderCharts(data);
+    }
     setWatchButton();
+    buildTimeframes();
   } catch (err) {
+    if (seq !== analysisSeq) return;
     toast(err.message);
+    setLiveStatus("lag", err.message);
+    if (state.pendingInterval === interval) state.pendingInterval = null;
+    buildTimeframes();
+  } finally {
+    if (seq === analysisSeq) {
+      hideDecision();
+      $("refreshBtn")?.classList.remove("spinning");
+    }
   }
 }
 
@@ -422,11 +781,16 @@ function renderPairList(filter = "") {
 }
 
 function selectSymbol(symbol) {
-  state.symbol = symbol;
-  localStorage.setItem("ca_symbol", symbol);
   $("pairMenu").hidden = true;
-  loadAnalysis();
+  if (symbol !== state.symbol) {
+    state.symbol = symbol;
+    localStorage.setItem("ca_symbol", symbol);
+    chartKey = "";
+    lastPrice = null;
+  }
+  loadAnalysis({ reason: "symbol", message: "در حال بارگذاری نماد و تصمیم‌گیری..." });
   if (state.page === "analysis") loadPredictions();
+  if (state.page === "outlook") loadOutlook();
 }
 
 async function loadCoins() {
@@ -463,61 +827,338 @@ async function loadMarkets() {
   }
 }
 
-async function loadAlerts() {
-  $("alertHeadline").textContent = "در حال اسکن طلا، یورو، دلار و ارزهای اصلی...";
-  $("alertHeroes").innerHTML = "";
-  $("alertBuys").innerHTML = "";
-  $("alertSells").innerHTML = "";
-  if ($("alertWaits")) $("alertWaits").innerHTML = "";
+let alertLoadInFlight = null;
+
+async function loadAlerts(opts) {
+  const silent = !!(opts && opts.silent);
+  const live = $("alertLive");
+  if (alertLoadInFlight) {
+    try {
+      await alertLoadInFlight;
+    } catch (_) { /* continue */ }
+    if (silent) return;
+  }
+  if (!silent) {
+    $("alertHeadline").textContent = "در حال اسکن طلا، یورو، دلار و ارزهای اصلی...";
+    if (live) live.textContent = "اسکن جدید...";
+  } else if (live) {
+    live.textContent = "بروزرسانی خودکار...";
+  }
   const extra = (state.watchlist || []).join(",");
-  try {
-    const data = await api(`/api/alerts?extra=${encodeURIComponent(extra)}`);
-    $("alertHeadline").textContent = data.headline || "";
-    $("alertNote").textContent = data.disclaimer || "";
-    const heroes = [data.best_buy, data.best_sell].filter(Boolean);
-    $("alertHeroes").innerHTML = heroes.map(alertHeroHtml).join("") || "<p class='muted'>الان مورد قوی نیست.</p>";
-    $("alertBuys").innerHTML = (data.buys || []).map(alertRowHtml).join("") || "<p class='muted'>هشدار خرید فعالی نیست.</p>";
-    $("alertSells").innerHTML = (data.sells || []).map(alertRowHtml).join("") || "<p class='muted'>هشدار فروش فعالی نیست.</p>";
-    if ($("alertWaits")) {
-      $("alertWaits").innerHTML = (data.watched || []).map(alertRowHtml).join("") || "";
+  const min = Number(state.alertMinOdds) || 50;
+  const run = (async () => {
+    const data = await api(`/api/alerts?extra=${encodeURIComponent(extra)}&min_odds=${encodeURIComponent(min)}`);
+    renderAlertBoard(data);
+    processHotAlerts(data);
+    if (live) {
+      const t = new Date();
+      const hh = String(t.getHours()).padStart(2, "0");
+      const mm = String(t.getMinutes()).padStart(2, "0");
+      const ss = String(t.getSeconds()).padStart(2, "0");
+      const n = (data.buys || []).length + (data.sells || []).length;
+      live.textContent = `آخرین بروزرسانی ${hh}:${mm}:${ss} · فیلتر ≥${min}٪ · پیشنهاد فعال: ${n}`;
     }
-    document.querySelectorAll("[data-alert-symbol]").forEach((el) => {
-      el.onclick = () => { selectSymbol(el.dataset.alertSymbol); goPage("dashboard"); };
-    });
+    return data;
+  })();
+  alertLoadInFlight = run;
+  try {
+    await run;
   } catch (err) {
     $("alertHeadline").textContent = err.message;
+    if (live) live.textContent = "خطا در اسکن — دوباره تلاش می‌شود";
+    if (!silent) toast(err.message);
+  } finally {
+    if (alertLoadInFlight === run) alertLoadInFlight = null;
+  }
+}
+
+function renderAlertBoard(data) {
+  if (!$("alertHeadline")) return;
+  $("alertHeadline").textContent = data.headline || "";
+  $("alertNote").textContent = data.disclaimer || "";
+  const heroes = [data.best_buy, data.best_sell].filter(Boolean);
+  $("alertHeroes").innerHTML = heroes.map(alertHeroHtml).join("") || "<p class='muted'>الان پیشنهاد فعالی بالای فیلترت نیست. دیده‌بان و رتبه‌بندی پایین را ببین.</p>";
+  $("alertBuys").innerHTML = (data.buys || []).map(alertRowHtml).join("") || "<p class='muted'>خرید فعالی بالای فیلتر نیست.</p>";
+  $("alertSells").innerHTML = (data.sells || []).map(alertRowHtml).join("") || "<p class='muted'>فروش فعالی بالای فیلتر نیست.</p>";
+  if ($("alertWaits")) {
+    $("alertWaits").innerHTML = (data.watched || []).map(alertRowHtml).join("") || "<p class='muted'>موردی در دیده‌بان نیست.</p>";
+  }
+  if ($("alertResearch")) {
+    $("alertResearch").innerHTML = (data.research || []).map(alertRowHtml).join("") || "<p class='muted'>—</p>";
+  }
+  if ($("alertNoTrade")) {
+    $("alertNoTrade").innerHTML = (data.no_trade || []).map(alertRowHtml).join("") || "";
+  }
+}
+
+function collectHotAlerts(data) {
+  const min = Number(state.alertMinOdds) || 50;
+  const rows = [...(data.buys || []), ...(data.sells || [])];
+  return rows.filter((a) =>
+    (a.action === "buy" || a.action === "sell") &&
+    Number(a.success_pct || a.probability || 0) >= min
+  );
+}
+
+function processHotAlerts(data) {
+  const hot = collectHotAlerts(data);
+  const dot = $("alertNavDot");
+  if (dot) dot.hidden = !hot.length;
+  syncAlertArmUi(hot);
+  if (document.hidden && hot.length) document.title = "🔔 هشدار معامله";
+  else if (!document.hidden) document.title = PAGE_TITLE;
+  if (!alertArmed || !hot.length) return;
+  const now = Date.now();
+  const due = [];
+  hot.forEach((a) => {
+    const key = `${a.symbol}:${a.action}`;
+    const prev = lastAlertNotify[key];
+    const pct = Number(a.success_pct || 0);
+    if (prev && now - prev.at < 8 * 60 * 1000 && pct < prev.pct + 8) return;
+    due.push(a);
+  });
+  due.sort((a, b) => Number(b.success_pct) - Number(a.success_pct));
+  due.slice(0, 2).forEach((a) => {
+    lastAlertNotify[`${a.symbol}:${a.action}`] = { at: now, pct: Number(a.success_pct || 0) };
+    if (state.alertSound) playAlertSound();
+    showTradeNotification(a);
+  });
+  if (due.length) sessionStorage.setItem("ca_alert_fired", JSON.stringify(lastAlertNotify));
+}
+
+function ensureAudio() {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!AC) return null;
+  if (!audioCtx) audioCtx = new AC();
+  return audioCtx;
+}
+
+function playAlertSound() {
+  const ctx = ensureAudio();
+  if (!ctx) return;
+  ctx.resume().catch(() => {});
+  const now = ctx.currentTime;
+  [880, 1175, 1568].forEach((freq, i) => {
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = "sine";
+    osc.frequency.value = freq;
+    const t = now + i * 0.14;
+    gain.gain.setValueAtTime(0.0001, t);
+    gain.gain.exponentialRampToValueAtTime(0.16, t + 0.02);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.32);
+    osc.connect(gain).connect(ctx.destination);
+    osc.start(t);
+    osc.stop(t + 0.34);
+  });
+}
+
+function showTradeNotification(a) {
+  const verb = a.action === "buy" ? "Buy" : "Sell";
+  const title = `${verb} ${a.mt_symbol || mtSymbol(a.symbol)}`;
+  const body = [
+    `احتمال ${a.success_pct}٪`,
+    a.entry ? `Price ${mtPrice(a.entry)}` : "",
+    a.stop_loss ? `SL ${mtPrice(a.stop_loss)}` : "",
+    a.tp1 ? `TP ${mtPrice(a.tp1)}` : "",
+  ].filter(Boolean).join(" · ");
+  if (!("Notification" in window) || Notification.permission !== "granted") {
+    toast(`${title} · ${body}`);
+    return;
+  }
+  const note = new Notification(title, {
+    body,
+    tag: "trendix-" + a.symbol,
+    dir: "rtl",
+    lang: "fa",
+    requireInteraction: true,
+  });
+  note.onclick = () => {
+    window.focus();
+    selectSymbol(a.symbol);
+    goPage("dashboard");
+    note.close();
+  };
+}
+
+async function toggleAlertArm() {
+  if (alertArmed) {
+    alertArmed = false;
+    localStorage.setItem("ca_alert_arm", "0");
+    syncAlertArmUi();
+    toast("هشدار صوتی خاموش شد");
+    return;
+  }
+  const ctx = ensureAudio();
+  if (ctx) await ctx.resume().catch(() => {});
+  playAlertSound();
+  if ("Notification" in window && Notification.permission !== "granted") {
+    const perm = await Notification.requestPermission();
+    if (perm !== "granted") toast("نوتیفیکیشن سیستم فعال نشد؛ صدا روی همین تب کار می‌کند.");
+  }
+  alertArmed = true;
+  localStorage.setItem("ca_alert_arm", "1");
+  syncAlertArmUi();
+  loadAlerts({ silent: true });
+}
+
+function syncAlertArmUi(hot) {
+  const btn = $("alertArmBtn");
+  if (btn) {
+    btn.classList.toggle("on", alertArmed);
+    btn.textContent = alertArmed ? "هشدار صوتی فعال است" : "فعال کردن هشدار صوتی";
+  }
+  const status = $("alertArmStatus");
+  if (!status) return;
+  const min = state.alertMinOdds || 50;
+  if (!alertArmed) {
+    status.textContent = "صدا خاموش است. دکمه را بزن تا برای پیشنهادهای فعال بوق بزند.";
+    return;
+  }
+  if (hot && hot.length) {
+    status.textContent = "آمادهٔ پخش: " + hot.map((a) => `${a.name_fa} ${a.success_pct}٪ ${a.action === "buy" ? "بخر" : "بفروش"}`).join(" · ");
+    return;
+  }
+  status.textContent = `هشدار صوتی روشن است — منتظر پیشنهاد فعال با احتمال ≥ ${min}٪`;
+}
+
+async function tickAlertWatch() {
+  try {
+    await loadAlerts({ silent: true });
+  } catch (_) { /* next pass */ }
+  const delay = document.hidden ? 45000 : 20000;
+  alertWatchTimer = setTimeout(tickAlertWatch, delay);
+}
+
+async function loadBacktest() {
+  const ticker = (state.analysis && state.analysis.ticker) || {};
+  if ($("btPair")) $("btPair").textContent = ticker.name_fa ? `${ticker.name_fa} · ${state.interval}` : state.symbol;
+  if ($("btStats")) $("btStats").innerHTML = "<p class='muted'>در حال اجرای استراتژی روی کندل‌های قبلی با هزینه معامله...</p>";
+  if ($("btTrades")) $("btTrades").innerHTML = "";
+  if ($("btEquity")) $("btEquity").innerHTML = "";
+  if ($("btVerdict")) $("btVerdict").textContent = "";
+  try {
+    const data = await api(`/api/backtest?symbol=${encodeURIComponent(state.symbol)}&interval=${state.interval}`);
+    const s = data.stats || {};
+    const oos = data.out_of_sample || {};
+    const ins = data.in_sample || {};
+    if ($("btPair")) $("btPair").textContent = `${(data.ticker || ticker).name_fa || state.symbol} · ${data.horizon || state.interval}`;
+    if (!data.ok) {
+      $("btStats").innerHTML = `<p class="muted">${data.error || "بک‌تست انجام نشد"}</p>`;
+      return;
+    }
+    if ($("btVerdict")) {
+      $("btVerdict").textContent = data.verdict || "";
+      $("btVerdict").dataset.edge = data.has_edge ? "yes" : (data.retired ? "no" : "weak");
+    }
+    const cell = (label, value, cls) => `<div><span>${label}</span><b class="${cls || ""}">${value ?? "—"}</b></div>`;
+    $("btStats").innerHTML = [
+      cell("معامله‌ها", s.trades ?? 0),
+      cell("برد", s.win_rate != null ? s.win_rate + "٪" : "—"),
+      cell("امید ریاضی", s.expectancy, (s.expectancy || 0) >= 0 ? "up" : "down"),
+      cell("ضریب سود", s.profit_factor ?? "—"),
+      cell("شارپ", s.sharpe ?? "—"),
+      cell("سورتینو", s.sortino ?? "—"),
+      cell("حداکثر افت", (s.max_dd_r ?? "—") + " R"),
+      cell("ریکاوری", s.recovery_factor ?? "—"),
+      cell("میانگین برد", s.avg_win ?? "—"),
+      cell("میانگین باخت", s.avg_loss ?? "—"),
+      cell("باخت متوالی", s.consecutive_losses ?? "—"),
+      cell("زمان در معامله", s.exposure_pct != null ? s.exposure_pct + "٪" : "—"),
+      cell("OOS معامله", oos.trades ?? 0),
+      cell("OOS امید", oos.expectancy, (oos.expectancy || 0) >= 0 ? "up" : "down"),
+      cell("IS امید", ins.expectancy, (ins.expectancy || 0) >= 0 ? "up" : "down"),
+    ].join("") + `<p class="hint">${data.disclaimer || ""}</p>`
+      + ((data.walk_forward || []).length
+        ? `<p class="hint">Walk-forward: ${(data.walk_forward || []).map((f) => `${f.from_pct}–${f.to_pct}٪ EV ${f.expectancy}R (${f.trades} معامله)`).join(" · ")}</p>`
+        : "");
+    const eq = data.equity || [];
+    const max = Math.max(1, ...eq.map((v) => Math.abs(v)));
+    $("btEquity").innerHTML = eq.map((v) => {
+      const h = Math.max(6, Math.round((Math.abs(v) / max) * 80));
+      const color = v >= 0 ? "var(--green)" : "var(--red)";
+      return `<i style="height:${h}px;background:${color}"></i>`;
+    }).join("");
+    $("btTrades").innerHTML = (data.trades || []).slice().reverse().map((t) => `
+      <article>
+        <div>
+          <strong>${t.side_fa}</strong>
+          <small> ورود ${t.entry} → خروج ${t.exit} · ${t.result_fa}${t.strategy ? " · " + t.strategy : ""}</small>
+        </div>
+        <b class="${t.win ? "win" : "loss"}">${t.pnl_r} R</b>
+      </article>
+    `).join("") || "<p class='muted'>معامله‌ای ثبت نشد — این هم نتیجه معتبر است.</p>";
+  } catch (err) {
+    if ($("btStats")) $("btStats").innerHTML = `<p class="muted">${err.message}</p>`;
     toast(err.message);
   }
 }
 
 function alertHeroHtml(a) {
-  const ticker = { price_prefix: a.price_prefix };
-  const zone = (a.entry_zone || []).filter(Boolean);
+  const odds = a.success_pct != null ? a.success_pct : a.probability;
+  const hot = (a.action === "buy" || a.action === "sell") && (a.status === "alert" || a.quality === "high_conviction" || a.quality === "strong" || a.quality === "moderate");
+  const side = a.action === "sell" ? "sell" : a.action === "buy" ? "buy" : "wait";
+  const levels = a.action === "wait" ? "" : mtLevelsHtml(a, side);
+  const live = mtPrice(a.price);
+  const tier = a.quality === "high_conviction" ? "🔥 قانع‌کننده" : a.quality === "strong" ? "قوی" : (a.quality_fa || a.strength || "");
+  const align = a.mtf_conflict ? "تضاد بازه‌ها" : (a.mtf_aligned ? "هم‌جهت HTF" : "");
   return `
-    <article class="alert-hero ${a.action}" data-alert-symbol="${a.symbol}">
+    <article class="alert-hero ${a.action}${hot ? " hot" : ""}${a.mtf_conflict ? " conflict" : ""}" data-alert-symbol="${a.symbol}">
       <header>
         <img src="${a.icon}" alt="" onerror="this.style.visibility='hidden'" />
-        <div><strong>${a.name_fa}</strong><small> ${formatPrice(a.price, ticker)}</small></div>
-        <span class="badge">${a.strength} · ${a.confidence}٪</span>
+        <div>
+          <strong>${a.name_fa}</strong>
+          <small>${a.mt_symbol || mtSymbol(a.symbol)} · ${a.interval_fa || ""} · <code class="mt-num" data-copy="${live}">${live || "—"}</code></small>
+        </div>
+        <span class="badge">${tier} · ${odds ?? "—"}٪${align ? " · " + align : ""}</span>
       </header>
       <div class="cmd">${a.command}</div>
       <p>${a.detail}</p>
-      <p>انتظار ${pctText(a.expected_move)} در ${a.horizon || "۱ ساعت"} · رژیم ${a.regime || "—"}</p>
-      ${a.action !== "wait" && zone.length === 2 ? `<p>ورود ${formatPrice(zone[0], ticker)} تا ${formatPrice(zone[1], ticker)} · حد ضرر ${formatPrice(a.stop_loss, ticker)} · هدف ${formatPrice(a.tp1, ticker)}</p>` : ""}
+      ${tfStackHtml(a)}
+      ${levels}
+      <p class="alert-meta">R:R ۱ به ${a.rr || a.min_rr || 2} · ${a.holding_period || a.horizon || ""} · ${a.regime || "—"} · EV ${a.expectancy ?? "—"}R · ${a.primary_strategy || ""}</p>
+      ${a.invalidation ? `<p class="alert-meta">ابطال: ${a.invalidation}</p>` : ""}
       <ul>${(a.reasons || []).map((r) => `<li>${r}</li>`).join("")}</ul>
     </article>`;
 }
 
+function tfStackHtml(a) {
+  const stack = a.tf_stack || [];
+  if (stack.length) {
+    return `<div class="tf-stack">${stack.map((s) => {
+      const lean = (s.side === "buy" || s.side === "sell") ? s.side : (s.lean || "wait");
+      const cls = lean === "buy" ? "buy" : lean === "sell" ? "sell" : "wait";
+      const edge = s.has_edge ? " edge" : "";
+      const label = s.side === "buy" || s.side === "sell" ? s.side_fa : (s.lean_fa || s.side_fa || "صبر");
+      const soft = (s.side !== "buy" && s.side !== "sell" && lean !== "wait") ? " soft" : "";
+      return `<i class="${cls}${edge}${soft}" title="${s.regime || ""} ${s.strategy || ""}">${s.interval_fa} ${label}</i>`;
+    }).join("")}</div>`;
+  }
+  if (a.setup_map) return `<p class="alert-meta setup-map">${a.setup_map}</p>`;
+  return "";
+}
+
 function alertRowHtml(a) {
-  const ticker = { price_prefix: a.price_prefix };
+  const odds = a.success_pct != null ? a.success_pct : a.probability;
+  const side = a.action === "sell" ? "sell" : a.action === "buy" ? "buy" : "";
+  const levels = side && a.action !== "wait" ? mtLevelsHtml(a, side) : "";
+  const act = a.action === "buy" ? "BUY" : a.action === "sell" ? "SELL" : (a.status === "edge_wait" ? "WAIT" : "NO TRADE");
+  const evNum = a.expectancy != null ? Number(a.expectancy) : null;
+  const evTxt = evNum != null ? ` · EV ${evNum >= 0 ? "+" : ""}${a.expectancy}R` : "";
+  const align = a.mtf_conflict ? " · تضاد بازه‌ها" : (a.mtf_aligned ? " · هم‌جهت HTF" : "");
   return `
-    <article class="alert-row ${a.action}" data-alert-symbol="${a.symbol}">
+    <article class="alert-row ${a.action}${a.mtf_conflict ? " conflict" : ""}" data-alert-symbol="${a.symbol}">
       <img src="${a.icon}" alt="" />
-      <div>
-        <strong>${a.name_fa}</strong>
-        <small>${a.strength} · احتمال ${a.probability}٪ · ${pctText(a.expected_move)}</small>
+      <div class="alert-row-body">
+        <div class="alert-row-top">
+          <strong>${a.name_fa}</strong>
+          <span class="act">${act}</span>
+        </div>
+        <small>${a.mt_symbol || mtSymbol(a.symbol)} · ${a.interval_fa || "—"} · ${a.quality_fa || a.strength || ""}${evTxt}${align}${odds ? " · " + odds + "٪" : ""}</small>
+        <small>${a.detail || ""}</small>
+        ${tfStackHtml(a)}
+        ${levels}
       </div>
-      <span class="act">${a.action === "buy" ? "بخر" : a.action === "sell" ? "بفروش" : "صبر"}</span>
     </article>`;
 }
 
@@ -658,14 +1299,38 @@ function goPage(page) {
   if (page === "charts" && state.analysis) renderBigChart(state.analysis);
   if (page === "news") loadNews();
   if (page === "watchlist") loadWatchlist();
+  if (page === "backtest") loadBacktest();
+}
+
+async function tickPrice() {
+  const symbol = state.symbol;
+  try {
+    const t = await api(`/api/ticker?symbol=${encodeURIComponent(symbol)}`);
+    if (symbol === state.symbol) applyLivePrice(t);
+  } catch (_) { /* keep last price */ }
+  priceTimer = setTimeout(tickPrice, 2500);
+}
+
+async function tickAnalysis() {
+  if (!state.refreshMs) return;
+  if (!state.pendingInterval) {
+    const page = state.page;
+    try {
+      if (page === "dashboard" || page === "charts") await loadAnalysis({ silent: true });
+      else if (page === "outlook") await loadOutlook();
+      else if (page === "analysis") await loadPredictions();
+      else if (page === "markets") await loadMarkets();
+      else if (page === "watchlist") await loadWatchlist();
+    } catch (_) { /* next tick */ }
+  }
+  if (state.refreshMs) analysisTimer = setTimeout(tickAnalysis, state.refreshMs);
 }
 
 function scheduleRefresh() {
-  if (timer) clearInterval(timer);
-  if (!state.refreshMs) return;
-  timer = setInterval(() => {
-    if (state.page === "dashboard" || state.page === "charts") loadAnalysis();
-  }, state.refreshMs);
+  if (priceTimer) clearTimeout(priceTimer);
+  if (analysisTimer) clearTimeout(analysisTimer);
+  tickPrice();
+  tickAnalysis();
 }
 
 function bind() {
@@ -683,12 +1348,14 @@ function bind() {
     if (!e.target.closest(".pair-wrap")) $("pairMenu").hidden = true;
   });
   $("watchToggle").onclick = toggleWatch;
-  $("refreshBtn").onclick = loadAnalysis;
+  $("refreshBtn").onclick = () => loadAnalysis({ reason: "manual", message: "در حال به‌روزرسانی قیمت و نتیجه..." });
+  if ($("btRun")) $("btRun").onclick = loadBacktest;
   $("chartType").querySelectorAll("button").forEach((b) => {
     b.onclick = () => {
       $("chartType").querySelectorAll("button").forEach((x) => x.classList.remove("active"));
       b.classList.add("active");
       state.chartType = b.dataset.type;
+      chartKey = "";
       if (state.analysis) renderCharts(state.analysis);
     };
   });
@@ -697,6 +1364,7 @@ function bind() {
     b.onclick = () => {
       state.indicators[b.dataset.ind] = !state.indicators[b.dataset.ind];
       b.classList.toggle("active", state.indicators[b.dataset.ind]);
+      chartKey = "";
       if (state.analysis) renderCharts(state.analysis);
     };
   });
@@ -718,6 +1386,42 @@ function bind() {
     localStorage.setItem("ca_refresh", String(state.refreshMs));
     scheduleRefresh();
   };
+  if ($("alertArmBtn")) $("alertArmBtn").onclick = toggleAlertArm;
+  if ($("alertSoundOn")) {
+    $("alertSoundOn").checked = state.alertSound;
+    $("alertSoundOn").onchange = (e) => {
+      state.alertSound = e.target.checked;
+      localStorage.setItem("ca_alert_sound", e.target.checked ? "1" : "0");
+    };
+  }
+  if ($("alertOddsMin")) {
+    $("alertOddsMin").value = String(state.alertMinOdds);
+    $("alertOddsMin").onchange = (e) => {
+      state.alertMinOdds = Number(e.target.value);
+      localStorage.setItem("ca_alert_min", String(state.alertMinOdds));
+      lastAlertNotify = {};
+      sessionStorage.removeItem("ca_alert_fired");
+      loadAlerts({ silent: false });
+    };
+  }
+  syncAlertArmUi();
+  if ($("page-alerts")) {
+    $("page-alerts").addEventListener("click", (e) => {
+      if (handleMtClick(e)) return;
+      if (e.target.closest(".alert-arm")) return;
+      const card = e.target.closest("[data-alert-symbol]");
+      if (card) {
+        selectSymbol(card.dataset.alertSymbol);
+        goPage("dashboard");
+      }
+    });
+  }
+  document.addEventListener("click", (e) => { handleMtClick(e); });
+  if ($("mtCopyAll")) $("mtCopyAll").onclick = () => copyText(mtCopyText());
+  document.addEventListener("click", () => { if (alertArmed) ensureAudio()?.resume?.(); }, { once: true });
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) document.title = PAGE_TITLE;
+  });
   window.addEventListener("resize", resizeCharts);
   document.addEventListener("fullscreenchange", () => {
     resizeCharts();
@@ -739,6 +1443,7 @@ async function init() {
   await loadCoins();
   await loadAnalysis();
   scheduleRefresh();
+  tickAlertWatch();
 }
 
 init();

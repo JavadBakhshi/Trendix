@@ -6,11 +6,13 @@ import numpy as np
 import pandas as pd
 
 from app.analysis.candles import analyze_candles
+from app.analysis.costs import asset_class, market_name
+from app.analysis.evidence import evaluate, holding_label, quality_tier
 from app.analysis.indicator_votes import score_indicators
 from app.analysis.layers import analyze_regime, analyze_session, analyze_stats, analyze_volume
 from app.analysis.ml_models import score_ml
 from app.analysis.structure import analyze_structure
-from app.config import HORIZON_FA, TIMEFRAMES
+from app.config import HORIZON_FA, MAX_CALIBRATED_PROB, MIN_RR, TIMEFRAMES
 
 
 BASE_WEIGHTS = {
@@ -45,18 +47,20 @@ def combine(
     candles = analyze_candles(df)
     volume = analyze_volume(df, volume_source)
     stats = analyze_stats(df)
-    indicators = score_indicators(df, regime["regime"])
+    indicators = score_indicators(df, regime.get("family") or regime["regime"])
     ml = score_ml(df)
     session = analyze_session(interval, symbol)
     mtf_score, mtf_reasons = _mtf_score(mtf)
+    evidence = evaluate(df, interval, symbol)
 
     weights = dict(BASE_WEIGHTS)
-    if regime["regime"] == "trending":
+    family = regime.get("family") or "ranging"
+    if family == "trending":
         weights["structure"] += 0.06
         weights["indicators"] += 0.03
         weights["stats"] -= 0.04
         weights["candles"] -= 0.02
-    elif regime["regime"] == "ranging":
+    elif family == "ranging":
         weights["stats"] += 0.05
         weights["indicators"] += 0.03
         weights["structure"] -= 0.04
@@ -83,29 +87,47 @@ def combine(
     final = float(np.clip(final + news_pen * 0.35, -100, 100))
 
     agreement = _agreement(layers)
-    if final >= 16:
-        direction, label = "buy", "خرید"
-    elif final <= -16:
-        direction, label = "sell", "فروش"
+    core = evidence.get("core") or {}
+    news_level = (news or {}).get("level", "low")
+    mtf_dir = _mtf_direction(mtf)
+    layers_agree = (np.sign(final) == 1 and core.get("side") == "buy") or (np.sign(final) == -1 and core.get("side") == "sell")
+    action, no_trade_why = _gate_action(final, core, evidence, news_level, mtf_dir, ml)
+
+    p_hat = float(evidence.get("calibrated_p") or 0.5)
+    if action == "buy":
+        p_hat = float(evidence.get("p_buy") or p_hat)
+    elif action == "sell":
+        p_hat = float(evidence.get("p_sell") or p_hat)
+    probability = int(np.clip(round(p_hat * 100), 22, MAX_CALIBRATED_PROB))
+    if action == "wait":
+        probability = int(np.clip(round(50 + (p_hat - 0.5) * 20), 28, 62))
+
+    oos = evidence.get("out_of_sample") or {}
+    n_oos = int(oos.get("trades") or 0)
+    shrink = min(1.0, n_oos / 16.0)
+    confidence = int(np.clip(50 + (probability - 50) * shrink + (agreement - 0.5) * 8, 18, MAX_CALIBRATED_PROB))
+    if news_level == "high":
+        confidence = max(18, confidence - 12)
+    if ml.get("hit_rate") is not None and ml["hit_rate"] < 52:
+        confidence = max(18, confidence - 4)
+
+    tier, tier_fa = quality_tier(action, evidence, agreement, news_level, bool(core.get("extended")), layers_agree)
+    if tier in {"avoid", "moderate", "no_trade"} and action in {"buy", "sell"}:
+        if tier == "avoid":
+            action = "wait"
+            no_trade_why = no_trade_why or evidence.get("verdict") or "لبه آماری کافی نیست"
+        elif tier == "moderate" and core.get("extended"):
+            action = "wait"
+            no_trade_why = no_trade_why or "ستاپ هست اما قیمت کشیده است؛ ورود الان کیفیت هشدار ندارد"
+
+    if action == "buy":
+        direction, label = "buy", "بخر"
+    elif action == "sell":
+        direction, label = "sell", "بفروش"
     else:
-        direction, label = "neutral", "نگه‌دار / خنثی"
-    if abs(final) >= 42:
-        label = "خرید قوی" if direction == "buy" else "فروش قوی" if direction == "sell" else label
+        direction, label = "wait", "صبر کن / بدون معامله"
 
-    probability = int(np.clip(50 + final * 0.42, 8, 92))
-    if direction == "sell":
-        probability = 100 - probability
-    if direction == "neutral":
-        probability = int(50 + final * 0.15)
-
-    confidence = int(np.clip(32 + abs(final) * 0.5 + agreement * 18, 18, 90))
-    if news and news.get("level") == "high":
-        confidence = max(18, confidence - 18)
-        direction, label = "neutral", "صبر به‌خاطر خبر"
-    if ml.get("hit_rate") and ml["hit_rate"] < 52:
-        confidence = max(18, confidence - 8)
-
-    conf_level = "HIGH" if confidence >= 70 else "MEDIUM" if confidence >= 50 else "LOW"
+    conf_level = "HIGH" if confidence >= 64 and tier == "high_conviction" else "MEDIUM" if confidence >= 52 else "LOW"
     conf_fa = {"HIGH": "بالا", "MEDIUM": "متوسط", "LOW": "پایین"}[conf_level]
 
     expected = ml["expected_return"] if ml.get("ok") else final / 9000
@@ -117,12 +139,31 @@ def combine(
         expected = -abs(expected)
     if direction == "buy" and expected < 0:
         expected = abs(expected)
-    if direction == "neutral":
-        expected *= 0.25
+    if direction == "wait":
+        expected *= 0.15
 
     target = price * (1 + expected)
     change_pct = (target - price) / price * 100
-    risk = _risk_plan(price, atr, direction, structure.get("levels") or {}, expected)
+    oos_ev = float(oos.get("expectancy") or 0)
+    buy_p = int(round(float(evidence.get("p_buy") or 0.5) * 100))
+    sell_p = int(round(float(evidence.get("p_sell") or 0.5) * 100))
+    plan = make_trade_plan(
+        price,
+        atr,
+        structure.get("levels") or {},
+        action=action,
+        buy_success=buy_p,
+        sell_success=sell_p,
+        no_trade_why=no_trade_why,
+        strategy=core.get("strategy_fa") or core.get("strategy"),
+        expectancy=oos_ev,
+    )
+    if plan["action"] == "buy":
+        risk = {"entry_zone": [plan["buy_at"], plan["buy_at"]], "stop_loss": plan["buy_sl"], "tp1": plan["buy_tp"], "tp2": plan["buy_tp2"], "rr": plan["buy_rr"]}
+    elif plan["action"] == "sell":
+        risk = {"entry_zone": [plan["sell_at"], plan["sell_at"]], "stop_loss": plan["sell_sl"], "tp1": plan["sell_tp"], "tp2": plan["sell_tp2"], "rr": plan["sell_rr"]}
+    else:
+        risk = {"entry_zone": [plan["buy_at"], plan["sell_at"]], "stop_loss": None, "tp1": None, "tp2": None, "rr": plan.get("min_rr")}
     seconds = next((tf["seconds"] for tf in TIMEFRAMES if tf["id"] == interval), 3600)
     last_ts = int(df.iloc[-1]["time"].timestamp())
     forecast = _forecast(price, expected, last_ts, seconds)
@@ -143,23 +184,35 @@ def combine(
     ):
         reasons.extend(block or [])
     reasons = [r for r in reasons if r.get("bias") != "neutral"][:8] + [r for r in reasons if r.get("bias") == "neutral"][:4]
+    if evidence.get("verdict"):
+        reasons.insert(0, {
+            "id": "evidence",
+            "text": evidence["verdict"],
+            "bias": action if action in {"buy", "sell"} else "neutral",
+        })
 
     risks = []
     if news and news.get("level") in {"high", "medium"}:
         risks.append((news["reasons"] or [{}])[0].get("text") or "ریسک خبر")
     if regime["volatility"] == "high":
-        risks.append("نوسان بالاست؛ استاپ را بزرگ‌تر در نظر بگیرید")
+        risks.append("نوسان بالاست؛ استاپ ATR را بزرگ‌تر در نظر بگیرید")
     if agreement < 0.35:
         risks.append("لایه‌های مدل با هم هم‌جهت نیستند")
+    if not evidence.get("has_edge"):
+        risks.append(evidence.get("verdict") or "لبه خارج از نمونه تأیید نشد")
     if not risks:
         risks.append("ریسک معمولی بازار؛ این خروجی توصیه سرمایه‌گذاری نیست")
 
     layer_pct = {k: int(np.clip(50 + v * 0.45, 5, 95)) for k, v in layers.items()}
-    summary = (
-        f"{label} با احتمال {probability}٪ و اطمینان {conf_fa}. "
-        f"رژیم: {regime['regime_fa']} · نوسان {regime['volatility_fa']}. "
-        f"{reasons[0]['text'] if reasons else ''}"
-    )
+    invalidation = _invalidation(action, plan, structure)
+    if action == "wait":
+        summary = f"بدون معامله. {no_trade_why or evidence.get('verdict') or 'ستاپ معتبر با امید ریاضی مثبت دیده نشد.'}"
+    else:
+        summary = (
+            f"{label} با احتمال کالیبره‌شده {probability}٪ (از {n_oos} معامله خارج از نمونه). "
+            f"رژیم: {regime['regime_fa']} · استراتژی: {core.get('strategy_fa') or '—'}. "
+            f"{reasons[0]['text'] if reasons else ''}"
+        )
 
     return {
         "direction": direction,
@@ -168,16 +221,40 @@ def combine(
         "confidence": confidence,
         "confidence_level": conf_level,
         "confidence_fa": conf_fa,
+        "quality": tier,
+        "quality_fa": tier_fa,
+        "no_trade_reason": None if action in {"buy", "sell"} else (no_trade_why or evidence.get("verdict")),
         "target_price": _round_price(target),
         "change_pct": round(change_pct, 3),
         "expected_move": round(change_pct, 3),
         "horizon": HORIZON_FA.get(interval, interval),
+        "holding_period": holding_label(interval),
         "interval": interval,
+        "market": market_name(symbol),
+        "asset_class": asset_class(symbol),
         "entry_zone": risk["entry_zone"],
         "stop_loss": risk["stop_loss"],
         "tp1": risk["tp1"],
         "tp2": risk["tp2"],
         "risk_reward": risk["rr"],
+        "plan": plan,
+        "primary_strategy": core.get("strategy"),
+        "primary_strategy_fa": core.get("strategy_fa"),
+        "invalidation": invalidation,
+        "evidence": {
+            "has_edge": evidence.get("has_edge"),
+            "retired": evidence.get("retired"),
+            "verdict": evidence.get("verdict"),
+            "oos": oos,
+            "in_sample": evidence.get("in_sample"),
+            "walk_forward": evidence.get("walk_forward"),
+            "costs": evidence.get("costs"),
+            "n_oos": n_oos,
+            "calibrated_p": round(p_hat, 3),
+            "best_strategy": evidence.get("best_strategy"),
+            "strategy_oos": evidence.get("strategy_oos"),
+            "core": core,
+        },
         "regime": regime["regime"],
         "regime_fa": regime["regime_fa"],
         "volatility": regime["volatility"],
@@ -204,7 +281,7 @@ def combine(
         },
         "session": session.get("session_fa"),
         "sentiment": sentiment or {},
-        "news_risk": (news or {}).get("level", "low"),
+        "news_risk": news_level,
         "news_events": (news or {}).get("events") or [],
         "volume_note": volume.get("source_note"),
         "reasons": reasons[:10],
@@ -213,7 +290,7 @@ def combine(
         "forecast": forecast,
         "ta_score": round(indicators["score"], 1),
         "ml_ok": bool(ml.get("ok")),
-        "disclaimer": "این پیش‌بینی آموزشی است، بک‌تست تضمینی برای آینده نیست و توصیه مالی محسوب نمی‌شود.",
+        "disclaimer": "احتمال از بک‌تست خارج از نمونه پس از هزینه است، نه فرمول تزئینی. توصیه مالی نیست.",
     }
 
 
@@ -249,34 +326,146 @@ def _agreement(layers: dict) -> float:
     return float(np.mean([1 if s == maj else 0 for s in signs]))
 
 
-def _risk_plan(price: float, atr: float, direction: str, levels: dict, expected: float) -> dict:
-    sl_dist = max(atr * 1.4, price * 0.002)
-    if direction == "buy":
-        support = levels.get("nearest_support")
-        sl = min(price - sl_dist, support - atr * 0.15) if support else price - sl_dist
-        entry_lo, entry_hi = price - atr * 0.25, price + atr * 0.05
-        r = price - sl
-        tp1, tp2 = price + r * 1.6, price + r * 2.6
-    elif direction == "sell":
-        resist = levels.get("nearest_resistance")
-        sl = max(price + sl_dist, resist + atr * 0.15) if resist else price + sl_dist
-        entry_lo, entry_hi = price - atr * 0.05, price + atr * 0.25
-        r = sl - price
-        tp1, tp2 = price - r * 1.6, price - r * 2.6
+def _mtf_direction(mtf: dict | None) -> str | None:
+    if not mtf:
+        return None
+    votes = []
+    for info in mtf.values():
+        d = info.get("direction")
+        if d == "buy":
+            votes.append(1)
+        elif d == "sell":
+            votes.append(-1)
+    if not votes:
+        return None
+    mean = float(np.mean(votes))
+    if mean >= 0.5:
+        return "buy"
+    if mean <= -0.5:
+        return "sell"
+    return None
+
+
+def _gate_action(final: float, core: dict, evidence: dict, news_level: str, mtf_dir: str | None, ml: dict) -> tuple[str, str | None]:
+    """NO TRADE unless the tested core setup exists and OOS expectancy is positive after costs."""
+    if news_level == "high":
+        return "wait", "ریسک خبر بالاست؛ معامله اجباری نیست"
+    side = core.get("side") or "wait"
+    if side == "wait":
+        if evidence.get("has_edge"):
+            return "wait", evidence.get("verdict") or "لبه تاریخی تأیید شده؛ الان ستاپ ورودی نیست"
+        return "wait", evidence.get("verdict") or "ستاپ آزمایش‌شده در این رژیم دیده نشد"
+    if evidence.get("retired") or not evidence.get("has_edge"):
+        return "wait", evidence.get("verdict") or "امید ریاضی خارج از نمونه پس از هزینه کافی نیست"
+    if side == "buy" and final <= -22:
+        return "wait", "ستاپ هست اما لایه‌های دیگر خلاف جهت‌اند"
+    if side == "sell" and final >= 22:
+        return "wait", "ستاپ هست اما لایه‌های دیگر خلاف جهت‌اند"
+    if mtf_dir and mtf_dir != side:
+        return side, None
+    return side, None
+
+
+def _invalidation(action: str, plan: dict, structure: dict) -> str:
+    if action == "buy":
+        sl = plan.get("buy_sl")
+        support = (structure.get("levels") or {}).get("nearest_support")
+        extra = f" یا شکست تأییدشده زیر { _fmt(support)}" if support else ""
+        return f"بسته شدن زیر حد ضرر {_fmt(sl) if sl else '—'}{extra}."
+    if action == "sell":
+        sl = plan.get("sell_sl")
+        resist = (structure.get("levels") or {}).get("nearest_resistance")
+        extra = f" یا شکست تأییدشده بالای { _fmt(resist)}" if resist else ""
+        return f"بسته شدن بالای حد ضرر {_fmt(sl) if sl else '—'}{extra}."
+    return "بدون معامله فعال؛ ابطال موضوعیت ندارد تا ستاپ معتبر تشکیل شود."
+
+
+def make_trade_plan(
+    price: float,
+    atr: float,
+    levels: dict,
+    action: str = "wait",
+    buy_success: int = 50,
+    sell_success: int = 50,
+    no_trade_why: str | None = None,
+    strategy: str | None = None,
+    expectancy: float = 0.0,
+) -> dict:
+    """Levels only. Action is decided by evidence gating, never by proximity to S/R."""
+    atr = max(float(atr or 0), price * 0.0015)
+    sl_dist = max(atr * 1.3, price * 0.0018)
+    support = levels.get("nearest_support")
+    resist = levels.get("nearest_resistance")
+    buy_at = price
+    sell_at = price
+    if support and support < price:
+        buy_sl = min(price - sl_dist, float(support) - atr * 0.15)
     else:
-        sl = price - sl_dist
-        tp1 = price + sl_dist
-        tp2 = price + sl_dist * 2
-        entry_lo, entry_hi = price - atr * 0.2, price + atr * 0.2
-        r = sl_dist
-    rr = round(abs((tp1 - price) / r), 2) if r else None
+        buy_sl = price - sl_dist
+    if resist and resist > price:
+        sell_sl = max(price + sl_dist, float(resist) + atr * 0.15)
+    else:
+        sell_sl = price + sl_dist
+    buy_r = abs(buy_at - buy_sl) or sl_dist
+    sell_r = abs(sell_sl - sell_at) or sl_dist
+    buy_tp, buy_tp2 = buy_at + buy_r * MIN_RR, buy_at + buy_r * (MIN_RR + 1)
+    sell_tp, sell_tp2 = sell_at - sell_r * MIN_RR, sell_at - sell_r * (MIN_RR + 1)
+    watch_buy = float(support) if support and support < price else price - atr * 0.55
+    watch_sell = float(resist) if resist and resist > price else price + atr * 0.55
+    if action == "buy":
+        success = buy_success
+        command = (
+            f"الان از {_fmt(price)} بخر · حد ضرر {_fmt(buy_sl)} · هدف {_fmt(buy_tp)} "
+            f"· R:R ۱:{MIN_RR:g} · احتمال کالیبره {success}٪"
+        )
+        now_text = f"استراتژی: {strategy or 'core'} · امید ریاضی OOS {expectancy:+.2f}R"
+    elif action == "sell":
+        success = sell_success
+        command = (
+            f"الان از {_fmt(price)} بفروش · حد ضرر {_fmt(sell_sl)} · هدف {_fmt(sell_tp)} "
+            f"· R:R ۱:{MIN_RR:g} · احتمال کالیبره {success}٪"
+        )
+        now_text = f"استراتژی: {strategy or 'core'} · امید ریاضی OOS {expectancy:+.2f}R"
+    else:
+        success = 0
+        command = no_trade_why or "بدون معامله — لبه آماری کافی نیست"
+        now_text = "NO TRADE"
+        buy_at, sell_at = watch_buy, watch_sell
+        buy_sl = buy_at - sl_dist
+        sell_sl = sell_at + sl_dist
+        buy_tp, buy_tp2 = buy_at + sl_dist * MIN_RR, buy_at + sl_dist * (MIN_RR + 1)
+        sell_tp, sell_tp2 = sell_at - sl_dist * MIN_RR, sell_at - sl_dist * (MIN_RR + 1)
+        buy_r = sl_dist
+        sell_r = sl_dist
     return {
-        "entry_zone": [_round_price(entry_lo), _round_price(entry_hi)],
-        "stop_loss": _round_price(sl),
-        "tp1": _round_price(tp1),
-        "tp2": _round_price(tp2),
-        "rr": rr,
+        "action": action,
+        "command": command,
+        "now_text": now_text,
+        "success_pct": success,
+        "buy_success": buy_success,
+        "sell_success": sell_success,
+        "min_rr": MIN_RR,
+        "buy_at": _round_price(buy_at),
+        "sell_at": _round_price(sell_at),
+        "buy_sl": _round_price(buy_sl),
+        "sell_sl": _round_price(sell_sl),
+        "buy_tp": _round_price(buy_tp),
+        "buy_tp2": _round_price(buy_tp2),
+        "sell_tp": _round_price(sell_tp),
+        "sell_tp2": _round_price(sell_tp2),
+        "buy_rr": round(abs((buy_tp - buy_at) / buy_r), 2) if buy_r else MIN_RR,
+        "sell_rr": round(abs((sell_at - sell_tp) / sell_r), 2) if sell_r else MIN_RR,
+        "disclaimer": "احتمال از معاملات خارج از نمونه پس از هزینه است؛ تضمین سود نیست.",
     }
+
+
+def _fmt(value: float) -> str:
+    v = _round_price(value)
+    if abs(v) >= 100:
+        return f"{v:,.2f}"
+    if abs(v) >= 1:
+        return f"{v:.4f}"
+    return f"{v:.6f}"
 
 
 def _forecast(price: float, expected: float, last_ts: int, step: int) -> list[dict]:
@@ -301,22 +490,45 @@ def _round_price(value: float) -> float:
 
 def empty_prediction(interval: str) -> dict:
     return {
-        "direction": "neutral",
-        "label": "خنثی",
+        "direction": "wait",
+        "label": "بدون معامله",
         "probability": 50,
         "confidence": 0,
         "confidence_level": "LOW",
         "confidence_fa": "پایین",
+        "quality": "no_trade",
+        "quality_fa": "بدون معامله",
+        "no_trade_reason": "داده کافی نیست",
         "target_price": 0,
         "change_pct": 0,
         "expected_move": 0,
         "horizon": HORIZON_FA.get(interval, interval),
+        "holding_period": None,
         "interval": interval,
         "entry_zone": [0, 0],
         "stop_loss": 0,
         "tp1": 0,
         "tp2": 0,
         "risk_reward": None,
+        "plan": {
+            "action": "wait",
+            "command": "داده کافی نیست",
+            "now_text": "NO TRADE",
+            "success_pct": 0,
+            "buy_success": 0,
+            "sell_success": 0,
+            "min_rr": 2,
+            "buy_at": 0,
+            "sell_at": 0,
+            "buy_sl": 0,
+            "sell_sl": 0,
+            "buy_tp": 0,
+            "sell_tp": 0,
+            "disclaimer": "این پیش‌بینی آموزشی است.",
+        },
+        "primary_strategy": None,
+        "invalidation": None,
+        "evidence": {"has_edge": False, "retired": False, "verdict": "داده کافی نیست"},
         "regime": "unknown",
         "regime_fa": "نامشخص",
         "volatility": "normal",

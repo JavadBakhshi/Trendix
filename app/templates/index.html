@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/css/style.css" />
+  <link rel="stylesheet" href="/static/css/style.css?v=signal10" />
   <script src="/static/js/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
@@ -36,6 +36,11 @@
         <button class="nav-item" data-page="alerts">
           <svg viewBox="0 0 24 24"><path d="M12 4a6 6 0 016 6c0 7 2 7 2 7H4s2 0 2-7a6 6 0 016-6z"/><path d="M10 18a2 2 0 004 0"/></svg>
           هشدار معامله
+          <span class="nav-dot" id="alertNavDot" hidden></span>
+        </button>
+        <button class="nav-item" data-page="backtest">
+          <svg viewBox="0 0 24 24"><path d="M4 19V5M4 19h16"/><path d="M7 16l3-4 3 2 4-6"/></svg>
+          تست گذشته
         </button>
         <button class="nav-item" data-page="outlook">
           <svg viewBox="0 0 24 24"><path d="M5 5h14v14H5z"/><path d="M8 9h8M8 13h8M8 17h5"/></svg>
@@ -99,6 +104,7 @@
           <div class="price-block">
             <div class="live-price" id="livePrice">—</div>
             <div class="live-change up" id="liveChange">—</div>
+            <div class="live-status" id="liveStatus"><i></i><span>در حال اتصال...</span></div>
           </div>
           <div class="top-actions">
             <button class="icon-btn" id="watchToggle" title="لیست پیگیری">
@@ -129,6 +135,11 @@
           <div class="chart-stage" id="chartStage">
             <div id="mainChart" class="chart-canvas"></div>
             <div id="extraChart" class="chart-canvas extra" hidden></div>
+            <div class="decision-overlay" id="decisionOverlay" hidden>
+              <span class="spinner" aria-hidden="true"></span>
+              <strong id="decisionTitle">در حال تصمیم‌گیری</strong>
+              <p id="decisionText">اندیکاتورها و مدل در حال جمع‌بندی هستند...</p>
+            </div>
           </div>
           <div class="ind-toggles" id="indToggles">
             <button data-ind="sma" class="active">MA</button>
@@ -140,31 +151,87 @@
           </div>
         </section>
 
-        <section class="pred-banner" id="predBanner">
-          <div class="pred-dir" data-dir="neutral">
-            <span id="predLabel">—</span>
-            <small id="predHorizon">پیش‌بینی</small>
-            <em id="predConfLevel"></em>
+        <section class="signal-card" id="predBanner">
+          <div class="signal-verb" id="signalVerb" data-dir="wait">بدون معامله</div>
+          <div class="signal-odds">
+            <strong id="signalOdds">—٪</strong>
+            <span>احتمال کالیبره‌شده (خارج از نمونه)</span>
+            <em id="signalRR">حداقل سود ۲ برابر حد ضرر</em>
           </div>
-          <div class="pred-meta">
-            <div><span>احتمال</span><strong id="predProb">—</strong></div>
-            <div><span>قیمت هدف</span><strong id="predTarget">—</strong></div>
-            <div><span>تغییر مورد انتظار</span><strong id="predChange">—</strong></div>
-            <div><span>ورود</span><strong id="predEntry">—</strong></div>
-            <div><span>حد ضرر</span><strong id="predSl">—</strong></div>
-            <div><span>اهداف</span><strong id="predTp">—</strong></div>
+          <p class="signal-quality" id="signalQuality"></p>
+          <p class="signal-now" id="signalNow">در حال تصمیم‌گیری...</p>
+          <p class="signal-cmd" id="signalCmd"></p>
+          <p class="signal-invalid" id="signalInvalid"></p>
+          <div class="signal-points">
+            <article class="point buy">
+              <small>از این نقطه بخر</small>
+              <strong id="buyAt">—</strong>
+              <p>حد ضرر <b id="buySl">—</b> · هدف <b id="buyTp">—</b></p>
+              <p>ریسک به ریوارد ۱ به ۲ · احتمال <b id="buyOdds">—</b></p>
+            </article>
+            <article class="point sell">
+              <small>از این نقطه بفروش</small>
+              <strong id="sellAt">—</strong>
+              <p>حد ضرر <b id="sellSl">—</b> · هدف <b id="sellTp">—</b></p>
+              <p>ریسک به ریوارد ۱ به ۲ · احتمال <b id="sellOdds">—</b></p>
+            </article>
           </div>
-          <div class="pred-chips" id="predChips"></div>
-          <div class="layer-bars" id="layerBars"></div>
-          <ul class="pred-reasons" id="predReasons"></ul>
-          <p class="pred-risks" id="predRisks"></p>
-          <p id="predSummary">در حال بارگذاری تحلیل...</p>
+          <div class="mt-copy" id="mtCopy">
+            <header>
+              <strong>کپی برای متاتریدر</strong>
+              <code class="mt-num" id="mtPair" data-copy="">—</code>
+              <span>عدد خام — روی عدد بزن تا کپی شود</span>
+              <button type="button" id="mtCopyAll">کپی همه</button>
+            </header>
+            <div class="mt-copy-grid">
+              <section class="mt-side buy">
+                <h3>Buy</h3>
+                <dl>
+                  <div><dt>Price</dt><dd><code class="mt-num" id="mtBuyAt" data-copy="">—</code></dd></div>
+                  <div><dt>SL</dt><dd><code class="mt-num" id="mtBuySl" data-copy="">—</code></dd></div>
+                  <div><dt>TP</dt><dd><code class="mt-num" id="mtBuyTp" data-copy="">—</code></dd></div>
+                </dl>
+              </section>
+              <section class="mt-side sell">
+                <h3>Sell</h3>
+                <dl>
+                  <div><dt>Price</dt><dd><code class="mt-num" id="mtSellAt" data-copy="">—</code></dd></div>
+                  <div><dt>SL</dt><dd><code class="mt-num" id="mtSellSl" data-copy="">—</code></dd></div>
+                  <div><dt>TP</dt><dd><code class="mt-num" id="mtSellTp" data-copy="">—</code></dd></div>
+                </dl>
+              </section>
+            </div>
+          </div>
+          <p class="signal-note" id="signalNote">سیگنال آموزشی است؛ قطعی یا تضمینی نیست.</p>
+          <details class="signal-details">
+            <summary>جزئیات مدل</summary>
+            <div class="pred-meta">
+              <div><span>احتمال</span><strong id="predProb">—</strong></div>
+              <div><span>قیمت هدف</span><strong id="predTarget">—</strong></div>
+              <div><span>تغییر مورد انتظار</span><strong id="predChange">—</strong></div>
+              <div><span>ورود</span><strong id="predEntry">—</strong></div>
+              <div><span>حد ضرر فعال</span><strong id="predSl">—</strong></div>
+              <div><span>اهداف فعال</span><strong id="predTp">—</strong></div>
+            </div>
+            <div class="pred-chips" id="predChips"></div>
+            <div class="layer-bars" id="layerBars"></div>
+            <ul class="pred-reasons" id="predReasons"></ul>
+            <p class="pred-risks" id="predRisks"></p>
+            <p id="predSummary"></p>
+            <div class="pred-dir" data-dir="neutral" hidden>
+              <span id="predLabel">—</span>
+              <small id="predHorizon">پیش‌بینی</small>
+              <em id="predConfLevel"></em>
+            </div>
+          </details>
         </section>
 
-        <section class="ta-card">
-          <h2>نمایش تحلیل تکنیکال</h2>
-          <div class="gauges" id="gauges"></div>
-        </section>
+        <details class="signal-details">
+          <summary>اندیکاتورها</summary>
+          <section class="ta-card">
+            <div class="gauges" id="gauges"></div>
+          </section>
+        </details>
       </div>
 
       <div class="page" id="page-markets">
@@ -190,24 +257,52 @@
 
       <div class="page" id="page-alerts">
         <header class="page-head">
-          <h1>هشدار خرید و فروش</h1>
-          <p class="muted">بهترین مورد الان بر اساس مدل ۱ ساعت + تأیید ۱۵ دقیقه</p>
+          <h1>هشدار معامله</h1>
+          <p class="muted">اسکن ۵د / ۱۵د / ۳۰د / ۱س / ۳س / ۱روز · نقشهٔ بازه‌ها تضاد ستاپ را نشان می‌دهد · فقط ستاپ+لبه+هم‌جهتی منطقی = هشدار فعال</p>
         </header>
+        <div class="alert-arm">
+          <button type="button" class="alert-arm-btn" id="alertArmBtn">فعال کردن هشدار صوتی</button>
+          <label class="alert-arm-check">
+            <input type="checkbox" id="alertSoundOn" checked />
+            صدا
+          </label>
+          <label class="alert-arm-field">
+            پیشنهاد اگر احتمال از
+            <select id="alertOddsMin">
+              <option value="50" selected>۵۰٪</option>
+              <option value="55">۵۵٪</option>
+              <option value="60">۶۰٪</option>
+              <option value="65">۶۵٪</option>
+              <option value="70">۷۰٪</option>
+            </select>
+            بیشتر شد
+          </label>
+          <p class="alert-arm-status" id="alertArmStatus">برای صدا، دکمه را بزن و این تب را باز نگه دار. اسکن خودکار است.</p>
+          <p class="alert-live" id="alertLive">آمادهٔ اسکن خودکار...</p>
+        </div>
         <p class="alert-headline" id="alertHeadline">در حال اسکن بازار...</p>
         <div class="alert-heroes" id="alertHeroes"></div>
         <div class="alert-cols">
           <section>
-            <h2>بخر</h2>
+            <h2>خرید — پیشنهاد فعال</h2>
             <div id="alertBuys"></div>
           </section>
           <section>
-            <h2>بفروش</h2>
+            <h2>فروش — پیشنهاد فعال</h2>
             <div id="alertSells"></div>
           </section>
         </div>
         <section>
-          <h2 class="alert-wait-title">فعلاً صبر</h2>
+          <h2 class="alert-wait-title">دیده‌بان — لبه هست، منتظر ستاپ</h2>
           <div id="alertWaits"></div>
+        </section>
+        <section>
+          <h2 class="alert-wait-title">رتبه‌بندی تحقیق (نزدیک‌ترین به لبه)</h2>
+          <div id="alertResearch"></div>
+        </section>
+        <section>
+          <h2 class="alert-wait-title">بدون لبه آماری</h2>
+          <div id="alertNoTrade"></div>
         </section>
         <p class="muted" id="alertNote"></p>
       </div>
@@ -253,6 +348,19 @@
         <div class="news-grid" id="newsGrid"></div>
       </div>
 
+      <div class="page" id="page-backtest">
+        <header class="page-head">
+          <h1>اعتبارسنجی روی گذشته</h1>
+          <p class="muted" id="btPair">—</p>
+        </header>
+        <p class="hint">سیگنال اصلی روی تاریخچه با اسپرد، کمیسیون و لغزش اجرا می‌شود. داده به داخل‌نمونه و خارج‌از‌نمونه تقسیم می‌شود. اگر امید ریاضی خارج از نمونه مثبت نباشد، سیستم معامله نمی‌کند.</p>
+        <button class="primary-btn" id="btRun">اجرای بک‌تست</button>
+        <p class="bt-verdict" id="btVerdict"></p>
+        <div id="btStats" class="bt-stats"></div>
+        <div id="btEquity" class="bt-equity"></div>
+        <div id="btTrades" class="bt-trades"></div>
+      </div>
+
       <div class="page" id="page-watchlist">
         <header class="page-head">
           <h1>لیست پیگیری</h1>
@@ -265,19 +373,20 @@
           <h1>تنظیمات</h1>
         </header>
         <div class="settings-card">
-          <label>بازه به‌روزرسانی خودکار (ثانیه)
+          <label>بازه به‌روزرسانی تحلیل (ثانیه)
             <select id="refreshInterval">
-              <option value="0">خاموش</option>
+              <option value="5">۵ — زنده</option>
+              <option value="8" selected>۸</option>
               <option value="15">۱۵</option>
-              <option value="30" selected>۳۰</option>
-              <option value="60">۶۰</option>
+              <option value="30">۳۰</option>
+              <option value="0">فقط قیمت زنده، تحلیل دستی</option>
             </select>
           </label>
           <label class="check">
             <input type="checkbox" id="showForecast" checked />
             نمایش خط پیش‌بینی روی نمودار
           </label>
-          <p class="hint">منبع داده هنگام اجرا به‌صورت خودکار بین بایننس، بای‌بیت و اوکی‌ایکس انتخاب می‌شود.</p>
+          <p class="hint">قیمت هر ۲ تا ۳ ثانیه به‌روز می‌شود. نتیجه تحلیل هم بدون رفرش صفحه دوباره محاسبه می‌شود. طلا و یورو از قیمت اسپات بازار جهانی خوانده می‌شوند.</p>
         </div>
       </div>
 
@@ -315,6 +424,6 @@
   </div>
 
   <div class="toast" id="toast" hidden></div>
-  <script src="/static/js/app.js"></script>
+  <script src="/static/js/app.js?v=signal10"></script>
 </body>
 </html>

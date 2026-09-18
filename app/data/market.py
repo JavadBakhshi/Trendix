@@ -20,6 +20,8 @@ from app.config import (
     CACHE_TTL_TICKER,
     HTTP_TIMEOUT,
     KLINE_LIMIT,
+    YAHOO_CHART_TTL,
+    YAHOO_QUOTE_TTL,
 )
 from app.data.coins import (
     COINS,
@@ -57,15 +59,26 @@ class TTLCache:
             return None
         value, expires = item
         if time.time() > expires:
-            self._data.pop(key, None)
             return None
         return value
+
+    def peek(self, key: str) -> Any | None:
+        item = self._data.get(key)
+        if not item:
+            return None
+        return item[0]
+
+    def expired(self, key: str) -> bool:
+        item = self._data.get(key)
+        if not item:
+            return True
+        return time.time() > item[1]
 
     def set(self, key: str, value: Any, ttl: float) -> None:
         self._data[key] = (value, time.time() + ttl)
 
 
-def _yahoo_get_sync(url: str, params: dict[str, str]) -> dict:
+def _yahoo_get_sync(url: str, params: dict[str, str], timeout: float = HTTP_TIMEOUT) -> dict:
     full = url + "?" + urllib.parse.urlencode(params)
     req = urllib.request.Request(
         full,
@@ -75,7 +88,7 @@ def _yahoo_get_sync(url: str, params: dict[str, str]) -> dict:
         },
     )
     try:
-        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode())
     except urllib.error.HTTPError as exc:
         raise RuntimeError(f"yahoo http {exc.code}") from exc
@@ -99,8 +112,10 @@ class MarketData:
             follow_redirects=True,
         )
         self._gecko_cache: dict[str, dict] = {}
-        self._yahoo_lock = asyncio.Lock()
+        self._yahoo_sem = asyncio.Semaphore(3)
+        self._yahoo_inflight: dict[str, asyncio.Task] = {}
         self._yahoo_chart_cache: dict[str, tuple[dict, float]] = {}
+        self._ticker_refreshing: set[str] = set()
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -178,24 +193,55 @@ class MarketData:
 
     async def ticker(self, symbol: str) -> dict:
         symbol = normalize_symbol(symbol)
-        cached = self._cache.get(f"ticker:{symbol}")
+        key = f"ticker:{symbol}"
+        cached = self._cache.get(key)
         if cached is not None:
             return cached
+        stale = self._cache.peek(key)
+        if stale is not None and not self._cache.expired(key):
+            return stale
+        if stale is not None:
+            item = self._cache._data.get(key)
+            overdue = time.time() - item[1] if item else 999
+            if overdue < 8:
+                self._kick_ticker_refresh(symbol)
+                return stale
+        data = await self._fetch_ticker(symbol)
+        self._cache.set(key, data, CACHE_TTL_TICKER)
+        return data
+
+    def _kick_ticker_refresh(self, symbol: str) -> None:
+        if symbol in self._ticker_refreshing:
+            return
+        self._ticker_refreshing.add(symbol)
+
+        async def _run() -> None:
+            try:
+                data = await asyncio.wait_for(self._fetch_ticker(symbol), timeout=12)
+                self._cache.set(f"ticker:{symbol}", data, CACHE_TTL_TICKER)
+            except Exception:
+                pass
+            finally:
+                self._ticker_refreshing.discard(symbol)
+
+        asyncio.create_task(_run())
+
+    async def _fetch_ticker(self, symbol: str) -> dict:
         spec = macro_spec(symbol)
         if spec:
             data = await self._macro_ticker(spec)
-            self._cache.set(f"ticker:{symbol}", data, CACHE_TTL_TICKER)
-            return data
-        source = await self.ensure_source()
-        if source == "binance":
-            data = await self._binance_ticker(symbol)
-        elif source == "bybit":
-            data = await self._bybit_ticker(symbol)
         else:
-            data = await self._okx_ticker(symbol)
-        gecko = await self._enrich_gecko(data["base"])
-        data.update(gecko)
-        self._cache.set(f"ticker:{symbol}", data, CACHE_TTL_TICKER)
+            source = await self.ensure_source()
+            if source == "binance":
+                data = await self._binance_ticker(symbol)
+            elif source == "bybit":
+                data = await self._bybit_ticker(symbol)
+            else:
+                data = await self._okx_ticker(symbol)
+            gecko = await self._enrich_gecko(data["base"])
+            data.update(gecko)
+            data["quote_source"] = source
+        data["as_of"] = time.time()
         return data
 
     async def klines(self, symbol: str, interval: str, limit: int = KLINE_LIMIT) -> list[dict]:
@@ -336,21 +382,109 @@ class MarketData:
         self._cache.set("news", news, CACHE_TTL_NEWS)
         return news
 
+    def _pack_live_macro(self, spec: dict, quote: dict) -> dict:
+        packed = pack_macro(spec)
+        packed.update(
+            {
+                "price": quote["price"],
+                "change_24h": quote.get("change_24h") or 0.0,
+                "high_24h": quote.get("high_24h") or 0.0,
+                "low_24h": quote.get("low_24h") or 0.0,
+                "volume_24h": quote.get("volume_24h") or 0.0,
+                "volume_base": quote.get("volume_base") or quote.get("volume_24h") or 0.0,
+                "market_cap": 0.0,
+                "circulating_supply": 0.0,
+                "image": spec["icon"],
+                "quote_source": quote.get("quote_source") or "spot",
+            }
+        )
+        return packed
+
+    async def _live_feed_ticker(self, feed: dict) -> dict:
+        kind, ident = feed.get("kind"), feed.get("id")
+        if kind == "bybit_linear":
+            return await self._bybit_linear_quote(ident)
+        if kind == "okx_swap":
+            return await self._okx_swap_quote(ident)
+        if kind == "binance":
+            await self.ensure_source()
+            raw = await self._binance_ticker(ident)
+            return {
+                "price": raw["price"],
+                "change_24h": raw.get("change_24h") or 0.0,
+                "high_24h": raw.get("high_24h") or 0.0,
+                "low_24h": raw.get("low_24h") or 0.0,
+                "volume_24h": raw.get("volume_24h") or 0.0,
+                "quote_source": "binance",
+            }
+        raise RuntimeError("unknown live feed")
+
+    async def _live_feed_klines(self, feed: dict, interval: str, limit: int) -> list[dict]:
+        kind, ident = feed.get("kind"), feed.get("id")
+        if kind == "bybit_linear":
+            return await self._bybit_linear_klines(ident, interval, limit)
+        if kind == "okx_swap":
+            return await self._okx_swap_klines(ident, interval, limit)
+        if kind == "binance":
+            source = await self.ensure_source()
+            return await self._fetch_klines(source, ident, interval, limit)
+        return []
+
+    async def _macro_from_binance(self, spec: dict) -> dict:
+        fallback = spec.get("binance")
+        if not fallback:
+            raise RuntimeError("no binance fallback")
+        await self.ensure_source()
+        data = await self._binance_ticker(fallback)
+        packed = pack_macro(spec)
+        data.update(packed)
+        data["image"] = spec["icon"]
+        data["quote_source"] = "binance"
+        return data
+
     async def _macro_ticker(self, spec: dict) -> dict:
+        for feed in spec.get("live_feeds") or []:
+            try:
+                quote = await self._live_feed_ticker(feed)
+                if quote.get("price"):
+                    return self._pack_live_macro(spec, quote)
+            except Exception:
+                continue
+        prefer_spot = bool(spec.get("prefer_spot") and spec.get("yahoo"))
+        if prefer_spot:
+            try:
+                return await self._yahoo_ticker(spec)
+            except Exception:
+                pass
+            try:
+                return await self._macro_from_binance(spec)
+            except Exception:
+                pass
+            raise RuntimeError(f"قیمت {spec['name_fa']} در دسترس نیست")
         fallback = spec.get("binance")
         if fallback:
             try:
-                await self.ensure_source()
-                data = await self._binance_ticker(fallback)
-                packed = pack_macro(spec)
-                data.update(packed)
-                data["image"] = spec["icon"]
-                return data
+                return await self._macro_from_binance(spec)
             except Exception:
                 pass
         return await self._yahoo_ticker(spec)
 
     async def _macro_klines(self, spec: dict, interval: str, limit: int) -> list[dict]:
+        for feed in spec.get("live_feeds") or []:
+            try:
+                rows = await self._live_feed_klines(feed, interval, limit)
+                if rows:
+                    return rows
+            except Exception:
+                continue
+        prefer_spot = bool(spec.get("prefer_spot") and spec.get("yahoo"))
+        if prefer_spot:
+            try:
+                rows = await self._yahoo_klines(spec, interval, limit)
+                if rows:
+                    return rows
+            except Exception:
+                pass
         fallback = spec.get("binance")
         if fallback:
             try:
@@ -360,21 +494,42 @@ class MarketData:
                     return rows
             except Exception:
                 pass
-        rows = await self._yahoo_klines(spec, interval, limit)
-        if rows:
-            return rows
+        if not prefer_spot:
+            rows = await self._yahoo_klines(spec, interval, limit)
+            if rows:
+                return rows
         raise RuntimeError(f"داده {spec['name_fa']} در دسترس نیست")
 
-    async def _yahoo_chart(self, yahoo_symbol: str, interval: str, range_: str) -> dict:
-        cache_key = f"{yahoo_symbol}:{interval}:{range_}"
+    async def _yahoo_load(self, cache_key: str, ttl: float, factory):
         hit = self._yahoo_chart_cache.get(cache_key)
         if hit and time.time() < hit[1]:
             return hit[0]
-        last_err: Exception | None = None
-        async with self._yahoo_lock:
-            hit = self._yahoo_chart_cache.get(cache_key)
-            if hit and time.time() < hit[1]:
-                return hit[0]
+        task = self._yahoo_inflight.get(cache_key)
+        if task:
+            return await asyncio.shield(task)
+
+        async def _run():
+            async with self._yahoo_sem:
+                hit2 = self._yahoo_chart_cache.get(cache_key)
+                if hit2 and time.time() < hit2[1]:
+                    return hit2[0]
+                value = await factory()
+                self._yahoo_chart_cache[cache_key] = (value, time.time() + ttl)
+                return value
+
+        task = asyncio.create_task(_run())
+        self._yahoo_inflight[cache_key] = task
+        try:
+            return await task
+        finally:
+            if self._yahoo_inflight.get(cache_key) is task:
+                self._yahoo_inflight.pop(cache_key, None)
+
+    async def _yahoo_chart(self, yahoo_symbol: str, interval: str, range_: str, ttl: float = YAHOO_CHART_TTL) -> dict:
+        cache_key = f"{yahoo_symbol}:{interval}:{range_}"
+
+        async def factory() -> dict:
+            last_err: Exception | None = None
             for host in (
                 "https://query2.finance.yahoo.com",
                 "https://query1.finance.yahoo.com",
@@ -384,17 +539,45 @@ class MarketData:
                         _yahoo_get_sync,
                         f"{host}/v8/finance/chart/{yahoo_symbol}",
                         {"interval": interval, "range": range_, "includePrePost": "false"},
+                        8.0,
                     )
                     result = (payload.get("chart") or {}).get("result")
                     if not result:
                         raise RuntimeError("yahoo empty")
-                    chart = result[0]
-                    self._yahoo_chart_cache[cache_key] = (chart, time.time() + 45)
-                    return chart
+                    return result[0]
                 except Exception as exc:
                     last_err = exc
                     continue
-        raise last_err or RuntimeError("yahoo failed")
+            raise last_err or RuntimeError("yahoo failed")
+
+        return await self._yahoo_load(cache_key, ttl, factory)
+
+    async def _yahoo_quote(self, yahoo_symbol: str) -> dict:
+        cache_key = f"quote:{yahoo_symbol}"
+
+        async def factory() -> dict:
+            last_err: Exception | None = None
+            for host in (
+                "https://query2.finance.yahoo.com",
+                "https://query1.finance.yahoo.com",
+            ):
+                try:
+                    payload = await asyncio.to_thread(
+                        _yahoo_get_sync,
+                        f"{host}/v7/finance/quote",
+                        {"symbols": yahoo_symbol},
+                        5.0,
+                    )
+                    result = ((payload.get("quoteResponse") or {}).get("result") or [None])[0]
+                    if not result:
+                        raise RuntimeError("yahoo quote empty")
+                    return result
+                except Exception as exc:
+                    last_err = exc
+                    continue
+            raise last_err or RuntimeError("yahoo quote failed")
+
+        return await self._yahoo_load(cache_key, YAHOO_QUOTE_TTL, factory)
 
     def _yahoo_rows(self, chart: dict, limit: int) -> list[dict]:
         stamps = chart.get("timestamp") or []
@@ -443,50 +626,180 @@ class MarketData:
             raise last_err
         return []
 
+    def _pack_yahoo_ticker(self, spec: dict, price: float, change: float, high: float, low: float, volume: float) -> dict:
+        packed = pack_macro(spec)
+        packed.update(
+            {
+                "price": price,
+                "change_24h": change,
+                "high_24h": high,
+                "low_24h": low,
+                "volume_24h": volume,
+                "volume_base": volume,
+                "market_cap": 0.0,
+                "circulating_supply": 0.0,
+                "image": spec["icon"],
+                "quote_source": "yahoo",
+            }
+        )
+        return packed
+
     async def _yahoo_ticker(self, spec: dict) -> dict:
         last_err: Exception | None = None
         for ysym in (spec.get("yahoo"), spec.get("yahoo_alt")):
             if not ysym:
                 continue
-            for interval, range_ in (("5m", "5d"), ("1d", "3mo")):
-                try:
-                    chart = await self._yahoo_chart(ysym, interval, range_)
-                    meta = chart.get("meta") or {}
-                    rows = self._yahoo_rows(chart, 400)
-                    price = _to_float(meta.get("regularMarketPrice"))
-                    if not price and rows:
-                        price = rows[-1]["close"]
-                    if not price:
-                        continue
-                    prev = _to_float(meta.get("previousClose") or meta.get("chartPreviousClose"))
-                    change = ((price - prev) / prev * 100) if prev else 0.0
-                    high = _to_float(meta.get("regularMarketDayHigh"))
-                    low = _to_float(meta.get("regularMarketDayLow"))
-                    if rows:
-                        recent = [r for r in rows if r["time"] >= int(time.time()) - 26 * 3600] or rows[-80:]
-                        if not high:
-                            high = max(r["high"] for r in recent)
-                        if not low:
-                            low = min(r["low"] for r in recent)
-                    packed = pack_macro(spec)
-                    packed.update(
-                        {
-                            "price": price,
-                            "change_24h": change,
-                            "high_24h": high,
-                            "low_24h": low,
-                            "volume_24h": _to_float(meta.get("regularMarketVolume")),
-                            "volume_base": _to_float(meta.get("regularMarketVolume")),
-                            "market_cap": 0.0,
-                            "circulating_supply": 0.0,
-                            "image": spec["icon"],
-                        }
+            try:
+                quote = await self._yahoo_quote(ysym)
+                price = _to_float(quote.get("regularMarketPrice"))
+                if price:
+                    prev = _to_float(quote.get("regularMarketPreviousClose"))
+                    change = _to_float(quote.get("regularMarketChangePercent"))
+                    if not change and prev:
+                        change = (price - prev) / prev * 100
+                    return self._pack_yahoo_ticker(
+                        spec,
+                        price,
+                        change,
+                        _to_float(quote.get("regularMarketDayHigh")),
+                        _to_float(quote.get("regularMarketDayLow")),
+                        _to_float(quote.get("regularMarketVolume")),
                     )
-                    return packed
-                except Exception as exc:
-                    last_err = exc
+            except Exception as exc:
+                last_err = exc
+            try:
+                chart = await self._yahoo_chart(ysym, "1m", "1d", ttl=YAHOO_QUOTE_TTL)
+                meta = chart.get("meta") or {}
+                rows = self._yahoo_rows(chart, 400)
+                price = _to_float(meta.get("regularMarketPrice"))
+                if not price and rows:
+                    price = rows[-1]["close"]
+                if not price:
                     continue
+                prev = _to_float(meta.get("previousClose") or meta.get("chartPreviousClose"))
+                change = ((price - prev) / prev * 100) if prev else 0.0
+                high = _to_float(meta.get("regularMarketDayHigh"))
+                low = _to_float(meta.get("regularMarketDayLow"))
+                if rows:
+                    recent = [r for r in rows if r["time"] >= int(time.time()) - 26 * 3600] or rows[-80:]
+                    if not high:
+                        high = max(r["high"] for r in recent)
+                    if not low:
+                        low = min(r["low"] for r in recent)
+                return self._pack_yahoo_ticker(
+                    spec,
+                    price,
+                    change,
+                    high,
+                    low,
+                    _to_float(meta.get("regularMarketVolume")),
+                )
+            except Exception as exc:
+                last_err = exc
+                continue
         raise last_err or RuntimeError("yahoo ticker failed")
+
+    async def _bybit_linear_quote(self, contract: str) -> dict:
+        r = await self._client.get(
+            "https://api.bybit.com/v5/market/tickers",
+            params={"category": "linear", "symbol": contract},
+        )
+        r.raise_for_status()
+        items = r.json().get("result", {}).get("list") or []
+        if not items:
+            raise RuntimeError("bybit gold ticker empty")
+        t = items[0]
+        price = (
+            _to_float(t.get("lastPrice"))
+            or _to_float(t.get("markPrice"))
+            or _to_float(t.get("indexPrice"))
+        )
+        if not price:
+            raise RuntimeError("bybit gold price empty")
+        return {
+            "price": price,
+            "change_24h": _to_float(t.get("price24hPcnt")) * 100,
+            "high_24h": _to_float(t.get("highPrice24h")),
+            "low_24h": _to_float(t.get("lowPrice24h")),
+            "volume_24h": _to_float(t.get("turnover24h")),
+            "quote_source": "bybit",
+        }
+
+    async def _bybit_linear_klines(self, contract: str, interval: str, limit: int) -> list[dict]:
+        iv = self._BYBIT_INTERVAL.get(interval, "60")
+        r = await self._client.get(
+            "https://api.bybit.com/v5/market/kline",
+            params={
+                "category": "linear",
+                "symbol": contract,
+                "interval": iv,
+                "limit": min(limit, 1000),
+            },
+        )
+        r.raise_for_status()
+        items = r.json().get("result", {}).get("list") or []
+        rows = []
+        for k in reversed(items):
+            rows.append(
+                {
+                    "time": int(k[0]) // 1000,
+                    "open": _to_float(k[1]),
+                    "high": _to_float(k[2]),
+                    "low": _to_float(k[3]),
+                    "close": _to_float(k[4]),
+                    "volume": _to_float(k[5]),
+                }
+            )
+        return rows
+
+    async def _okx_swap_quote(self, inst_id: str) -> dict:
+        r = await self._client.get(
+            "https://www.okx.com/api/v5/market/ticker",
+            params={"instId": inst_id},
+        )
+        r.raise_for_status()
+        items = r.json().get("data") or []
+        if not items:
+            raise RuntimeError("okx gold ticker empty")
+        t = items[0]
+        last = _to_float(t.get("last")) or _to_float(t.get("idxPx"))
+        if not last:
+            raise RuntimeError("okx gold price empty")
+        open24 = _to_float(t.get("open24h"))
+        change = ((last - open24) / open24 * 100) if open24 else 0.0
+        return {
+            "price": last,
+            "change_24h": change,
+            "high_24h": _to_float(t.get("high24h")),
+            "low_24h": _to_float(t.get("low24h")),
+            "volume_24h": _to_float(t.get("volCcy24h")),
+            "quote_source": "okx",
+        }
+
+    async def _okx_swap_klines(self, inst_id: str, interval: str, limit: int) -> list[dict]:
+        r = await self._client.get(
+            "https://www.okx.com/api/v5/market/candles",
+            params={
+                "instId": inst_id,
+                "bar": self._OKX_BAR.get(interval, "1H"),
+                "limit": str(min(limit, 300)),
+            },
+        )
+        r.raise_for_status()
+        items = r.json().get("data") or []
+        rows = []
+        for k in reversed(items):
+            rows.append(
+                {
+                    "time": int(k[0]) // 1000,
+                    "open": _to_float(k[1]),
+                    "high": _to_float(k[2]),
+                    "low": _to_float(k[3]),
+                    "close": _to_float(k[4]),
+                    "volume": _to_float(k[5]),
+                }
+            )
+        return rows
 
     async def _fetch_klines(self, source: str, symbol: str, interval: str, limit: int) -> list[dict]:
         if source == "binance":

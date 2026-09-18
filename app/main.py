@@ -6,7 +6,7 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -15,11 +15,25 @@ from app.analysis.predictor import analyze, predict
 from app.analysis.indicators import add_indicators
 from app.analysis.context import fear_greed, news_risk
 from app.analysis.brief import build_brief
-from app.analysis.alerts import scan_alerts
+from app.analysis.alerts import scan_alerts, warm_alerts_cache
+from app.analysis.backtest import run_backtest
 from app.config import DEFAULT_SYMBOL, TIMEFRAME_IDS, TIMEFRAMES
 from app.data.market import market
 
 BASE_DIR = Path(__file__).resolve().parent
+_ALERTS_CACHE: dict = {"at": 0.0, "key": "", "data": None}
+_ALERTS_REFRESHING = False
+
+
+async def _alerts_bg_refresh(extras: list[str], min_odds: int, key: str) -> None:
+    global _ALERTS_REFRESHING
+    try:
+        data = await scan_alerts(extras, min_odds=min_odds)
+        _ALERTS_CACHE.update({"at": time.time(), "key": key, "data": data})
+    except Exception:
+        pass
+    finally:
+        _ALERTS_REFRESHING = False
 
 
 @asynccontextmanager
@@ -28,6 +42,7 @@ async def lifespan(_app: FastAPI):
         await market.ensure_source()
     except Exception:
         pass
+    asyncio.create_task(warm_alerts_cache())
     yield
     await market.close()
 
@@ -42,6 +57,15 @@ app.add_middleware(
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 
 
+@app.middleware("http")
+async def no_store_api(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+    return response
+
+
 def _interval_or_400(interval: str) -> str:
     if interval not in TIMEFRAME_IDS:
         raise HTTPException(400, "بازه زمانی نامعتبر است")
@@ -50,7 +74,10 @@ def _interval_or_400(interval: str) -> str:
 
 @app.get("/")
 async def index():
-    return FileResponse(BASE_DIR / "templates" / "index.html")
+    return FileResponse(
+        BASE_DIR / "templates" / "index.html",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.get("/api/health")
@@ -134,6 +161,15 @@ async def analysis(
             sentiment=sentiment if isinstance(sentiment, dict) else {},
             news=news if isinstance(news, dict) else {},
         )
+        candles = result["candles"]
+        live = ticker_data.get("price")
+        if candles and live is not None:
+            last = dict(candles[-1])
+            price = float(live)
+            last["close"] = price
+            last["high"] = max(float(last["high"]), price)
+            last["low"] = min(float(last["low"]), price)
+            candles[-1] = last
         perf = await market.performance(symbol, ticker_data["price"])
         return jsonable({
             "source": market.source,
@@ -142,10 +178,27 @@ async def analysis(
             "performance": perf,
             "indicators": result["indicators"],
             "prediction": result["prediction"],
-            "candles": result["candles"],
+            "candles": candles,
             "volume": result["volume"],
             "overlays": result["overlays"],
         })
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
+@app.get("/api/backtest")
+async def backtest(
+    symbol: str = Query(DEFAULT_SYMBOL),
+    interval: str = Query("30m"),
+):
+    interval = _interval_or_400(interval)
+    try:
+        df = await market.klines_df(symbol, interval)
+        data = run_backtest(df, interval, symbol)
+        ticker_data = await market.ticker(symbol)
+        return jsonable({"ticker": ticker_data, "source": market.source, **data})
     except HTTPException:
         raise
     except Exception as exc:
@@ -201,14 +254,25 @@ _ALERTS_CACHE: dict = {"at": 0.0, "key": "", "data": None}
 
 
 @app.get("/api/alerts")
-async def alerts(extra: str = Query("")):
+async def alerts(
+    extra: str = Query(""),
+    min_odds: int = Query(50, ge=40, le=78),
+):
+    global _ALERTS_REFRESHING
     extras = [s.strip().upper() for s in extra.split(",") if s.strip()]
-    key = ",".join(extras)
+    key = f"{','.join(extras)}|{min_odds}"
     now = time.time()
-    if _ALERTS_CACHE["data"] is not None and _ALERTS_CACHE["key"] == key and now - _ALERTS_CACHE["at"] < 45:
+    age = now - float(_ALERTS_CACHE.get("at") or 0)
+    have = _ALERTS_CACHE["data"] is not None and _ALERTS_CACHE["key"] == key
+    if have and age < 18:
+        return jsonable(_ALERTS_CACHE["data"])
+    if have and age < 90:
+        if not _ALERTS_REFRESHING:
+            _ALERTS_REFRESHING = True
+            asyncio.create_task(_alerts_bg_refresh(extras, min_odds, key))
         return jsonable(_ALERTS_CACHE["data"])
     try:
-        data = await scan_alerts(extras)
+        data = await scan_alerts(extras, min_odds=min_odds)
         _ALERTS_CACHE.update({"at": now, "key": key, "data": data})
         return jsonable(data)
     except Exception as exc:

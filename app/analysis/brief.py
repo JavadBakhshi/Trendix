@@ -10,7 +10,7 @@ SHORT = {"5m", "15m", "30m"}
 MID = {"1h", "3h"}
 LONG = {"1d", "1w"}
 
-DIR_FA = {"buy": "صعودی", "sell": "نزولی", "neutral": "خنثی / رنج"}
+DIR_FA = {"buy": "صعودی", "sell": "نزولی", "neutral": "خنثی / رنج", "wait": "بدون معامله"}
 
 
 def build_brief(ticker: dict, rows: list[dict], consensus: str, consensus_label: str) -> dict:
