@@ -27,8 +27,11 @@ DEFAULT_UNIVERSE = [
     "DXY",
     "BTCUSDT",
     "ETHUSDT",
+    "BNBUSDT",
     "SOLUSDT",
     "XRPUSDT",
+    "ADAUSDT",
+    "DOGEUSDT",
 ]
 
 # Full predict only on signal TFs. Context TFs stay lean for speed.
