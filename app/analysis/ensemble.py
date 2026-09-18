@@ -40,18 +40,23 @@ def combine(
     if df.empty or len(df) < 30:
         return empty_prediction(interval)
 
-    price = float(df["close"].iloc[-1])
-    atr = float(df["atr"].iloc[-1]) if "atr" in df.columns and pd.notna(df["atr"].iloc[-1]) else price * 0.008
-    regime = analyze_regime(df)
-    structure = analyze_structure(df)
-    candles = analyze_candles(df)
-    volume = analyze_volume(df, volume_source)
-    stats = analyze_stats(df)
-    indicators = score_indicators(df, regime.get("family") or regime["regime"])
-    ml = score_ml(df)
+    # Forming candle is incomplete — decide on last closed bar only.
+    work = df.iloc[:-1].copy() if len(df) > 80 else df
+    if work.empty or len(work) < 30:
+        return empty_prediction(interval)
+
+    price = float(work["close"].iloc[-1])
+    atr = float(work["atr"].iloc[-1]) if "atr" in work.columns and pd.notna(work["atr"].iloc[-1]) else price * 0.008
+    regime = analyze_regime(work)
+    structure = analyze_structure(work)
+    candles = analyze_candles(work)
+    volume = analyze_volume(work, volume_source)
+    stats = analyze_stats(work)
+    indicators = score_indicators(work, regime.get("family") or regime["regime"])
+    ml = score_ml(work)
     session = analyze_session(interval, symbol)
     mtf_score, mtf_reasons = _mtf_score(mtf)
-    evidence = evaluate(df, interval, symbol)
+    evidence = evaluate(work, interval, symbol)
 
     weights = dict(BASE_WEIGHTS)
     family = regime.get("family") or "ranging"
@@ -165,7 +170,7 @@ def combine(
     else:
         risk = {"entry_zone": [plan["buy_at"], plan["sell_at"]], "stop_loss": None, "tp1": None, "tp2": None, "rr": plan.get("min_rr")}
     seconds = next((tf["seconds"] for tf in TIMEFRAMES if tf["id"] == interval), 3600)
-    last_ts = int(df.iloc[-1]["time"].timestamp())
+    last_ts = int(work.iloc[-1]["time"].timestamp())
     forecast = _forecast(price, expected, last_ts, seconds)
 
     reasons = []
@@ -243,6 +248,7 @@ def combine(
         "invalidation": invalidation,
         "evidence": {
             "has_edge": evidence.get("has_edge"),
+            "edge_nearby": evidence.get("edge_nearby"),
             "retired": evidence.get("retired"),
             "verdict": evidence.get("verdict"),
             "oos": oos,
@@ -254,6 +260,7 @@ def combine(
             "best_strategy": evidence.get("best_strategy"),
             "strategy_oos": evidence.get("strategy_oos"),
             "core": core,
+            "regime_breakdown": evidence.get("regime_breakdown"),
         },
         "regime": regime["regime"],
         "regime_fa": regime["regime_fa"],
@@ -352,17 +359,24 @@ def _gate_action(final: float, core: dict, evidence: dict, news_level: str, mtf_
         return "wait", "ریسک خبر بالاست؛ معامله اجباری نیست"
     side = core.get("side") or "wait"
     if side == "wait":
-        if evidence.get("has_edge"):
-            return "wait", evidence.get("verdict") or "لبه تاریخی تأیید شده؛ الان ستاپ ورودی نیست"
+        if evidence.get("edge_nearby") or evidence.get("has_edge"):
+            return "wait", evidence.get("verdict") or "لبه تاریخی نزدیک است؛ الان ستاپ ورودی نیست"
         return "wait", evidence.get("verdict") or "ستاپ آزمایش‌شده در این رژیم دیده نشد"
     if evidence.get("retired") or not evidence.get("has_edge"):
         return "wait", evidence.get("verdict") or "امید ریاضی خارج از نمونه پس از هزینه کافی نیست"
+    if mtf_dir and mtf_dir != side:
+        return "wait", "تضاد با تایم‌فریم بالاتر — صبر تا هم‌جهتی"
     if side == "buy" and final <= -22:
         return "wait", "ستاپ هست اما لایه‌های دیگر خلاف جهت‌اند"
     if side == "sell" and final >= 22:
         return "wait", "ستاپ هست اما لایه‌های دیگر خلاف جهت‌اند"
-    if mtf_dir and mtf_dir != side:
-        return side, None
+    hit = ml.get("hit_rate")
+    ml_score = float(ml.get("score") or 0)
+    if hit is not None and hit < 48 and abs(ml_score) >= 12:
+        if side == "buy" and ml_score < 0:
+            return "wait", "مدل آماری خلاف جهت خرید است"
+        if side == "sell" and ml_score > 0:
+            return "wait", "مدل آماری خلاف جهت فروش است"
     return side, None
 
 

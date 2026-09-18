@@ -36,11 +36,18 @@ def analyze(
     }
 
 
-def predict(df: pd.DataFrame, interval: str, symbol: str = "BTCUSDT") -> dict:
+def predict(
+    df: pd.DataFrame,
+    interval: str,
+    symbol: str = "BTCUSDT",
+    mtf: dict | None = None,
+    news: dict | None = None,
+    sentiment: dict | None = None,
+) -> dict:
     if df.empty:
         return empty_prediction(interval)
     work = df if "rsi" in df.columns else add_indicators(df)
-    return combine(work, interval, symbol, None)
+    return combine(work, interval, symbol, None, mtf=mtf, sentiment=sentiment, news=news)
 
 
 def _candles(df: pd.DataFrame) -> list[dict]:

@@ -38,5 +38,6 @@ def cost_spec(symbol: str) -> dict:
     return spec
 
 
-def one_way_frac(symbol: str) -> float:
-    return cost_spec(symbol)["one_way_bps"] / 10_000.0
+def one_way_frac(symbol: str, stress: float = 1.0) -> float:
+    """One-way cost as fraction of price. Optional stress > 1 for conservative edge tests."""
+    return cost_spec(symbol)["one_way_bps"] / 10_000.0 * max(1.0, float(stress or 1.0))

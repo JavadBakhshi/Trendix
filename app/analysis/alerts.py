@@ -30,7 +30,7 @@ PRIMARY_INTERVALS = ["1h", "15m", "5m"]
 LEAN_INTERVALS = ["1d", "3h", "30m"]
 ALL_INTERVALS = ["1d", "3h", "1h", "30m", "15m", "5m"]
 CONTEXT_INTERVALS = ["1d", "3h", "1h"]
-ALERT_TIERS = {"high_conviction", "strong", "moderate"}
+ALERT_TIERS = {"high_conviction", "strong"}
 _SEM = asyncio.Semaphore(8)
 _SCAN_CACHE: dict = {"at": 0.0, "key": "", "rows": None, "refreshing": False}
 _SCAN_TTL = 40.0
@@ -127,45 +127,23 @@ def _assemble(scored: list[dict], min_odds: int, now: float) -> dict:
         success = int(item.get("success_pct") or 0)
         action = item.get("action")
         has_edge = bool(item.get("has_edge"))
+        edge_nearby = bool(item.get("edge_nearby") or has_edge)
         conflict = bool(item.get("mtf_conflict"))
         news = item.get("news_risk") or "low"
+        quality = item.get("quality") or "no_trade"
 
-        # Soft direction from edge + HTF lean when model is waiting for a precise entry.
-        if action not in {"buy", "sell"} and has_edge and success >= min_odds and news != "high":
-            htf = item.get("context_bias") if item.get("context_bias") in {"buy", "sell"} else None
-            ltf = item.get("lean") if item.get("lean") in {"buy", "sell"} else None
-            soft = htf or ltf
-            if soft in {"buy", "sell"}:
-                item["action"] = soft
-                item["status"] = "alert"
-                item["quality"] = "moderate"
-                item["quality_fa"] = "قابل پیشنهاد"
-                item["strength"] = "قابل پیشنهاد"
-                item["command"] = f"{'🟢 BUY' if soft == 'buy' else '🔴 SELL'}  {item.get('mt_symbol')}"
-                clash = ""
-                if htf and ltf and htf != ltf:
-                    clash = f" · توجه: کوتاه‌مدت به سمت {DIR_FA.get(ltf)} متمایل است"
-                    item["mtf_conflict"] = False
-                    item["quality_fa"] = "قابل پیشنهاد (با احتیاط)"
-                item["detail"] = (
-                    f"لبه تأییدشده روی {item.get('interval_fa')} · جهت {DIR_FA.get(soft)} "
-                    f"از بافت بالاتر (ستاپ کامل هنوز نیست) · احتمال {success}٪{clash}"
-                )
-                action = soft
-                live.append(item)
-                continue
-            item["status"] = "edge_wait"
-            watched.append(item)
-            continue
-
-        if action in {"buy", "sell"} and news != "high" and success >= min_odds and not conflict:
+        # Live alert only: real setup + OOS edge + quality tier + no HTF conflict.
+        if (
+            action in {"buy", "sell"}
+            and has_edge
+            and quality in ALERT_TIERS
+            and news != "high"
+            and success >= min_odds
+            and not conflict
+        ):
             item["status"] = "alert"
-            if item.get("quality") not in ALERT_TIERS:
-                item["quality"] = "strong" if has_edge and (success >= 58 or item.get("mtf_aligned")) else "moderate"
-                item["quality_fa"] = TIER_FA.get(item["quality"], item["quality"])
-                item["strength"] = item["quality_fa"]
-            if not has_edge:
-                item["detail"] = f"{item.get('detail')} · لبه آماری ضعیف‌تر از فیلتر کاربر".strip(" ·")
+            item["quality_fa"] = TIER_FA.get(quality, quality)
+            item["strength"] = item["quality_fa"]
             live.append(item)
         elif action in {"buy", "sell"} and has_edge and conflict and success >= min_odds:
             item["status"] = "edge_wait"
@@ -173,11 +151,15 @@ def _assemble(scored: list[dict], min_odds: int, now: float) -> dict:
             item["quality_fa"] = "تضاد بازه‌ها"
             item["command"] = f"⏳ تضاد بازه‌ها  {item.get('mt_symbol')}"
             watched.append(item)
-        elif item.get("status") == "edge_wait" or (has_edge and action == "wait"):
+        elif item.get("status") == "edge_wait" or (edge_nearby and action == "wait") or (has_edge and action == "wait"):
             item["status"] = "edge_wait"
             watched.append(item)
         elif action in {"buy", "sell"} and success >= min_odds and not has_edge:
             item["status"] = "setup_no_edge"
+            watched.append(item)
+        elif action in {"buy", "sell"} and has_edge and quality not in ALERT_TIERS:
+            item["status"] = "edge_wait"
+            item["quality_fa"] = "نیاز به کیفیت بالاتر"
             watched.append(item)
 
     buys = sorted([r for r in live if r["action"] == "buy"], key=lambda x: (x.get("rank") or 0, x.get("success_pct") or 0), reverse=True)
@@ -212,8 +194,8 @@ def _assemble(scored: list[dict], min_odds: int, now: float) -> dict:
         "updated_at": int(now),
         "headline": _headline(best_buy, best_sell, scored, waits, min_odds),
         "disclaimer": (
-            f"فیلتر موفقیت ≥ {min_odds}٪ روی پیشنهاد فعال اعمال می‌شود. "
-            "اسکن خودکار بدون رفرش صفحه به‌روز می‌شود. هشدار صوتی فقط بعد از زدن دکمهٔ فعال‌سازی و برای پیشنهاد فعال کار می‌کند."
+            f"فیلتر موفقیت ≥ {min_odds}٪. هشدار فعال فقط با ستاپ واقعی + لبه OOS + کیفیت قوی/قانع‌کننده "
+            "و بدون تضاد تایم بالاتر. پیشنهاد ساختگی از lean حذف شده است."
         ),
     }
 
@@ -224,8 +206,15 @@ async def _score_symbol(symbol: str) -> dict | None:
             ticker = await market.ticker(symbol)
         except Exception:
             return None
+        news = {"level": "low", "score": 0.0}
+        try:
+            from app.analysis.context import news_risk
+
+            news = await news_risk(market._client, symbol)
+        except Exception:
+            pass
         primary = await asyncio.gather(
-            *[_load_full(symbol, iv) for iv in PRIMARY_INTERVALS],
+            *[_load_full(symbol, iv, news=news) for iv in PRIMARY_INTERVALS],
             return_exceptions=True,
         )
         lean = await asyncio.gather(
@@ -252,13 +241,15 @@ async def _score_symbol(symbol: str) -> dict | None:
         best["context_bias"] = context.get("bias")
         best["context_bias_fa"] = context.get("bias_fa")
         best["setup_map"] = _setup_map_text(stack)
+        best["news_risk"] = (news or {}).get("level") or best.get("news_risk") or "low"
         if best.get("mtf_note"):
             best["detail"] = f"{best['detail']} · {best['mtf_note']}".strip(" ·")
         return best
 
 
-async def _load_full(symbol: str, interval: str) -> dict | None:
-    key = f"full:{symbol}:{interval}"
+async def _load_full(symbol: str, interval: str, news: dict | None = None) -> dict | None:
+    news_level = (news or {}).get("level") or "low"
+    key = f"full:{symbol}:{interval}:{news_level}"
     hit = _PRED_CACHE.get(key)
     if hit and time.time() - hit[0] < _PRED_TTL:
         return hit[1]
@@ -271,7 +262,7 @@ async def _load_full(symbol: str, interval: str) -> dict | None:
         _PRED_CACHE[key] = (time.time(), None)
         return None
     try:
-        out = predict(add_indicators(df), interval, symbol)
+        out = predict(add_indicators(df), interval, symbol, news=news)
     except Exception:
         out = None
     _PRED_CACHE[key] = (time.time(), out)
@@ -331,6 +322,7 @@ def _candidate_from_pred(symbol: str, ticker: dict, interval: str, p1: dict, ful
     oos = ev.get("oos") or {}
     expectancy = float(oos.get("expectancy") or 0)
     has_edge = bool(ev.get("has_edge"))
+    edge_nearby = bool(ev.get("edge_nearby") or has_edge)
     best_strat = ev.get("best_strategy") or {}
     if has_edge and best_strat.get("has_edge") and best_strat.get("expectancy") is not None:
         expectancy = float(best_strat["expectancy"])
@@ -348,7 +340,7 @@ def _candidate_from_pred(symbol: str, ticker: dict, interval: str, p1: dict, ful
 
     if action in {"buy", "sell"} and has_edge:
         status = "alert" if quality in ALERT_TIERS else "candidate"
-    elif has_edge and action == "wait":
+    elif (has_edge or edge_nearby) and action == "wait":
         status = "edge_wait"
         quality = "moderate"
     elif action in {"buy", "sell"} and not has_edge:
@@ -422,6 +414,7 @@ def _candidate_from_pred(symbol: str, ticker: dict, interval: str, p1: dict, ful
         "oos_trades": oos.get("trades") or 0,
         "oos_pf": oos.get("profit_factor"),
         "has_edge": has_edge,
+        "edge_nearby": bool(ev.get("edge_nearby") or has_edge),
         "min_rr": plan.get("min_rr") or 2,
         "rr": rr,
         "relative": False,

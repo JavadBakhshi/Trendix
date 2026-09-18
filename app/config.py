@@ -36,15 +36,21 @@ HOLD_BARS = {
 # Conservative one-way cost components in basis points of price.
 # Round-trip cost = 2 * (spread/2 + commission + slippage).
 COST_BPS = {
-    "crypto": {"spread_bps": 4.0, "commission_bps": 4.0, "slippage_bps": 3.0},
-    "fx": {"spread_bps": 1.2, "commission_bps": 0.0, "slippage_bps": 0.4},
-    "gold": {"spread_bps": 2.5, "commission_bps": 0.0, "slippage_bps": 0.8},
-    "index": {"spread_bps": 2.0, "commission_bps": 0.5, "slippage_bps": 0.8},
+    "crypto": {"spread_bps": 5.0, "commission_bps": 5.0, "slippage_bps": 4.0},
+    "fx": {"spread_bps": 1.5, "commission_bps": 0.0, "slippage_bps": 0.5},
+    "gold": {"spread_bps": 3.0, "commission_bps": 0.0, "slippage_bps": 1.0},
+    "index": {"spread_bps": 2.5, "commission_bps": 0.5, "slippage_bps": 1.0},
 }
 
-MIN_OOS_TRADES = 6
-MIN_EXPECTANCY_R = 0.0
-MIN_PROFIT_FACTOR = 1.05
-MAX_CALIBRATED_PROB = 78
+# Edge gate: stress costs in the simulator so "edge" survives worse fills.
+COST_STRESS = 1.35
+
+# Professional floors — small-sample "EV > 0" is noise, not an edge.
+MIN_OOS_TRADES = 12
+MIN_EXPECTANCY_R = 0.05
+MIN_PROFIT_FACTOR = 1.15
+MIN_SIDE_TRADES = 8
+MIN_WF_POSITIVE_FOLDS = 2
+MAX_CALIBRATED_PROB = 72
 MIN_RR = 2.0
 ATR_STOP_MULT = 1.3

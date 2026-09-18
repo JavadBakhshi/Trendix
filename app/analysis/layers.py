@@ -28,7 +28,7 @@ def analyze_regime(df: pd.DataFrame) -> dict:
         regime, family, regime_fa = "strong_bull", "trending", "روند صعودی قوی"
     elif adx == adx and adx >= 28 and bear:
         regime, family, regime_fa = "strong_bear", "trending", "روند نزولی قوی"
-    elif adx == adx and adx >= 18:
+    elif adx == adx and adx >= 20:
         regime, family, regime_fa = "weak_trend", "trending", "روند ضعیف"
     elif bb_pctile <= 22:
         regime, family, regime_fa = "compression", "compression", "فشردگی / آماده شکست"

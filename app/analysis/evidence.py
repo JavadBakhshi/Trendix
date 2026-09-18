@@ -9,12 +9,15 @@ from app.analysis.costs import cost_spec, one_way_frac
 from app.analysis.indicators import add_indicators
 from app.config import (
     ATR_STOP_MULT,
+    COST_STRESS,
     HOLD_BARS,
     MAX_CALIBRATED_PROB,
     MIN_EXPECTANCY_R,
     MIN_OOS_TRADES,
     MIN_PROFIT_FACTOR,
     MIN_RR,
+    MIN_SIDE_TRADES,
+    MIN_WF_POSITIVE_FOLDS,
     TIMEFRAMES,
 )
 
@@ -79,15 +82,17 @@ def evaluate(df: pd.DataFrame, interval: str, symbol: str = "BTCUSDT") -> dict:
     if strat != "none" and strat in strategy_oos:
         gate_oos = strategy_oos[strat]
         gate_is = strategy_is.get(strat) or _empty_stats()
-        retired, has_edge, why = _verdict(gate_is, gate_oos, strategy=strat)
-        oos_for_prob = [t for t in oos_trades if t.get("strategy") == strat] or oos_trades
+        retired, has_edge, why = _verdict(gate_is, gate_oos, strategy=strat, folds=folds)
+        oos_for_prob = [t for t in oos_trades if t.get("strategy") == strat]
         active_oos = gate_oos
     else:
-        book_retired, book_edge, book_why = _verdict(is_stats, oos_stats)
+        # No live setup → not tradeable. Nearby book edge is research-only.
+        book_retired, book_edge, book_why = _verdict(is_stats, oos_stats, folds=folds)
         best = _best_strategy(strategy_oos)
         any_edge = any(bool(s.get("has_edge")) for s in strategy_oos.values())
-        has_edge = bool(any_edge or book_edge)
-        retired = not has_edge
+        has_edge = False
+        edge_nearby = bool(any_edge or book_edge)
+        retired = not edge_nearby
         if best:
             note = "" if best.get("has_edge") else " — هنوز برای تأیید لبه نمونه کافی نیست"
             why = (
@@ -98,8 +103,19 @@ def evaluate(df: pd.DataFrame, interval: str, symbol: str = "BTCUSDT") -> dict:
             why = book_why
         oos_for_prob = oos_trades
         active_oos = oos_stats
-    p_buy, n_buy = calibrated_prob(oos_for_prob or trades, "buy")
-    p_sell, n_sell = calibrated_prob(oos_for_prob or trades, "sell")
+    regime_break = _regime_breakdown(oos_trades or trades)
+    if has_edge and strat != "none":
+        for rb in regime_break:
+            if rb.get("regime") == core.get("regime") and int(rb.get("trades") or 0) >= 6 and float(rb.get("expectancy") or 0) < 0:
+                has_edge = False
+                retired = True
+                why = (
+                    f"در رژیم فعلی ({REGIME_FA.get(core.get('regime'), core.get('regime'))}) "
+                    f"امید ریاضی OOS منفی است ({float(rb.get('expectancy') or 0):+.2f}R)"
+                )
+                break
+    p_buy, n_buy = calibrated_prob(oos_for_prob, "buy")
+    p_sell, n_sell = calibrated_prob(oos_for_prob, "sell")
     side = core["side"]
     p_side = p_buy if side == "buy" else p_sell if side == "sell" else 0.5
     result = {
@@ -116,6 +132,7 @@ def evaluate(df: pd.DataFrame, interval: str, symbol: str = "BTCUSDT") -> dict:
         "strategy_oos": strategy_oos,
         "walk_forward": folds,
         "has_edge": has_edge,
+        "edge_nearby": bool(has_edge or (strat == "none" and any(bool(s.get("has_edge")) for s in strategy_oos.values()))),
         "retired": retired,
         "verdict": why,
         "core": core,
@@ -124,7 +141,7 @@ def evaluate(df: pd.DataFrame, interval: str, symbol: str = "BTCUSDT") -> dict:
         "n_buy": n_buy,
         "n_sell": n_sell,
         "calibrated_p": p_side,
-        "regime_breakdown": _regime_breakdown(oos_trades or trades),
+        "regime_breakdown": regime_break,
         "best_strategy": _best_strategy(strategy_oos),
     }
     if len(_CACHE) > 80:
@@ -262,14 +279,19 @@ def quality_tier(
     if n < MIN_OOS_TRADES or ev <= MIN_EXPECTANCY_R or (pf is not None and pf < MIN_PROFIT_FACTOR):
         return "avoid", "اجتناب"
     high = (
-        ev >= 0.10
-        and n >= 10
+        ev >= 0.12
+        and n >= max(15, MIN_OOS_TRADES + 3)
         and p >= 0.58
         and agreement >= 0.55
         and layers_agree
         and news_level != "medium"
     )
-    strong = ev >= 0.03 and n >= MIN_OOS_TRADES and p >= 0.54 and agreement >= 0.40
+    strong = (
+        ev >= max(0.05, MIN_EXPECTANCY_R)
+        and n >= MIN_OOS_TRADES
+        and p >= 0.55
+        and agreement >= 0.42
+    )
     if high:
         return "high_conviction", "قانع‌کننده"
     if strong:
@@ -278,17 +300,16 @@ def quality_tier(
 
 
 def calibrated_prob(trades: list[dict], side: str) -> tuple[float, int]:
-    subset = [t for t in trades if t["side"] == side]
-    if len(subset) < 5:
-        subset = list(trades)
+    """Side-specific OOS win rate with Laplace + strong shrink. Never mixes buy/sell books."""
+    subset = [t for t in (trades or []) if t.get("side") == side]
     n = len(subset)
-    if n == 0:
-        return 0.5, 0
-    wins = sum(1 for t in subset if t["win"])
+    if n < MIN_SIDE_TRADES:
+        return 0.5, n
+    wins = sum(1 for t in subset if t.get("win"))
     raw = (wins + 1.0) / (n + 2.0)
-    shrink = min(1.0, n / 16.0)
+    shrink = min(1.0, n / 24.0)
     p = 0.5 + (raw - 0.5) * shrink
-    return float(min(MAX_CALIBRATED_PROB / 100.0, max(0.22, p))), n
+    return float(min(MAX_CALIBRATED_PROB / 100.0, max(0.28, p))), n
 
 
 def summarize(trades: list[dict], bars: int, interval: str) -> dict:
@@ -342,7 +363,7 @@ def summarize(trades: list[dict], bars: int, interval: str) -> dict:
 
 def _simulate(work: pd.DataFrame, interval: str, symbol: str) -> list[dict]:
     hold = HOLD_BARS.get(interval, 8)
-    cost = one_way_frac(symbol)
+    cost = one_way_frac(symbol, COST_STRESS)
     n = len(work)
     trades: list[dict] = []
     i = 80
@@ -440,7 +461,11 @@ def _strategy_stats(trades: list[dict], bars: int, interval: str) -> dict[str, d
         n = int(stats.get("trades") or 0)
         ev = float(stats.get("expectancy") or 0)
         pf = stats.get("profit_factor")
-        has_edge = n >= MIN_OOS_TRADES and ev > MIN_EXPECTANCY_R and (pf is None or pf >= MIN_PROFIT_FACTOR)
+        has_edge = (
+            n >= MIN_OOS_TRADES
+            and ev > MIN_EXPECTANCY_R
+            and (pf is None or pf >= MIN_PROFIT_FACTOR)
+        )
         why = (
             f"{STRATEGY_FA.get(name, name)}: OOS EV {ev:+.2f}R · PF {pf} · {n} معامله"
             if n
@@ -461,18 +486,29 @@ def _best_strategy(strategy_oos: dict[str, dict]) -> dict | None:
     return ranked[0] if ranked else None
 
 
-def _verdict(is_stats: dict, oos_stats: dict, strategy: str | None = None) -> tuple[bool, bool, str]:
+def _verdict(
+    is_stats: dict,
+    oos_stats: dict,
+    strategy: str | None = None,
+    folds: list[dict] | None = None,
+) -> tuple[bool, bool, str]:
     n_oos = int(oos_stats.get("trades") or 0)
     ev_oos = float(oos_stats.get("expectancy") or 0)
     ev_is = float(is_stats.get("expectancy") or 0)
     pf = oos_stats.get("profit_factor")
     label = STRATEGY_FA.get(strategy or "", strategy or "استراتژی")
     if n_oos < MIN_OOS_TRADES:
-        return False, False, f"{label}: نمونه خارج از نمونه کافی نیست ({n_oos} معامله)"
-    if ev_is >= 0.15 and ev_oos < 0:
+        return False, False, f"{label}: نمونه خارج از نمونه کافی نیست ({n_oos}/{MIN_OOS_TRADES} معامله)"
+    if ev_is >= 0.12 and ev_oos < MIN_EXPECTANCY_R:
         return True, False, f"{label}: داخل‌نمونه خوب و خارج‌نمونه ضعیف — احتمال برازش بیش‌ازحد"
     if ev_oos <= MIN_EXPECTANCY_R or (pf is not None and pf < MIN_PROFIT_FACTOR):
-        return True, False, f"{label}: پس از هزینه امید ریاضی خارج از نمونه مثبت نیست (EV {ev_oos:+.2f}R)"
+        return True, False, f"{label}: پس از هزینهٔ استرس‌شده امید ریاضی کافی نیست (EV {ev_oos:+.2f}R)"
+    if folds:
+        scored = [f for f in folds if int(f.get("trades") or 0) >= 3]
+        if len(scored) >= 3:
+            pos = sum(1 for f in scored if float(f.get("expectancy") or 0) > 0)
+            if pos < MIN_WF_POSITIVE_FOLDS:
+                return True, False, f"{label}: ثبات walk-forward ضعیف ({pos}/{len(scored)} بازه مثبت)"
     if ev_oos > MIN_EXPECTANCY_R and (pf is None or pf >= MIN_PROFIT_FACTOR):
         return False, True, f"{label}: امید ریاضی خارج از نمونه پس از هزینه مثبت است (EV {ev_oos:+.2f}R)"
     return False, False, f"{label}: لبه آماری کافی دیده نشد"
@@ -558,6 +594,7 @@ def _empty_evidence(interval: str, symbol: str, why: str) -> dict:
         "strategy_oos": {},
         "walk_forward": [],
         "has_edge": False,
+        "edge_nearby": False,
         "retired": False,
         "verdict": why,
         "core": {"side": "wait", "score": 0.0, "regime": "unknown", "family": "ranging", "strategy": "none", "extended": False, "regime_fa": "نامشخص", "strategy_fa": STRATEGY_FA["none"]},
