@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/css/style.css?v=signal12" />
+  <link rel="stylesheet" href="/static/css/style.css?v=signal13" />
   <script src="/static/js/lightweight-charts.standalone.production.js"></script>
 </head>
 <body>
@@ -40,7 +40,7 @@
         </button>
         <button class="nav-item" data-page="autotrade">
           <svg viewBox="0 0 24 24"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
-          معامله خودکار
+          اسکالپ خودکار
         </button>
         <button class="nav-item" data-page="backtest">
           <svg viewBox="0 0 24 24"><path d="M4 19V5M4 19h16"/><path d="M7 16l3-4 3 2 4-6"/></svg>
@@ -314,16 +314,22 @@
 
       <div class="page" id="page-autotrade">
         <header class="page-head">
-          <h1>معامله خودکار (دمو MetaTrader)</h1>
-          <p class="muted">اتصال به MT5 آلپاری روی همان سیستمی که ترمینال باز است — نه روی سرور ابری. رمز در گیت ذخیره نمی‌شود.</p>
+          <h1>خرید/فروش خودکار — اسکالپ</h1>
+          <p class="muted">از همین منو روشن می‌شود؛ حلقه داخل خود برنامه می‌چرخد (بدون فایل جدا). برای لینوکس باید MT5 آلپاری با Wine باز باشد.</p>
         </header>
         <div class="settings-card autotrade-card">
+          <div class="autotrade-actions">
+            <button type="button" class="alert-arm-btn" id="atStartBtn">▶ شروع اسکالپ خودکار</button>
+            <button type="button" class="alert-test-btn" id="atStopBtn">⏹ توقف</button>
+            <button type="button" class="alert-test-btn" id="atTestBtn">تست اتصال MT5</button>
+            <button type="button" class="alert-test-btn" id="atRefreshBtn">بروزرسانی</button>
+          </div>
           <label class="check">
             <input type="checkbox" id="atEnabled" />
-            فعال‌سازی معامله خودکار
+            حلقه فعال است (با شروع/توقف هم عوض می‌شود)
           </label>
-          <label>شماره اکانت
-            <input id="atLogin" type="text" inputmode="numeric" autocomplete="username" placeholder="مثلاً 7837964" />
+          <label>شماره اکانت دمو
+            <input id="atLogin" type="text" inputmode="numeric" autocomplete="username" placeholder="شماره اکانت" />
           </label>
           <label>رمز عبور
             <input id="atPassword" type="password" autocomplete="current-password" placeholder="رمز دمو" />
@@ -331,36 +337,33 @@
           <label>سرور
             <input id="atServer" type="text" placeholder="Alpari-MT5-Demo" value="Alpari-MT5-Demo" />
           </label>
-          <label>مسیر ترمینال (اختیاری، ویندوز)
-            <input id="atPath" type="text" placeholder="C:\\Program Files\\MetaTrader 5\\terminal64.exe" />
+          <label>مسیر ترمینال (لینوکس/Wine یا ویندوز)
+            <input id="atPath" type="text" placeholder="مثلاً ~/.wine/drive_c/Program Files/MetaTrader 5/terminal64.exe" />
           </label>
           <label>سبک
             <select id="atMode">
-              <option value="scalping">اسکالپ (سریع‌تر)</option>
-              <option value="intraday" selected>میان‌روز / شبیه سویینگ کوتاه</option>
-              <option value="swing">سویینگ (کم‌معامله‌تر)</option>
+              <option value="scalping" selected>اسکالپ سریع (پیشنهادی)</option>
+              <option value="intraday">میان‌روز</option>
+              <option value="swing">سویینگ</option>
             </select>
           </label>
           <label>ریسک هر معامله (٪ موجودی)
-            <input id="atRisk" type="number" min="0.1" max="3" step="0.1" value="0.5" />
+            <input id="atRisk" type="number" min="0.1" max="3" step="0.1" value="0.4" />
           </label>
           <label>حداکثر پوزیشن همزمان
-            <input id="atMaxPos" type="number" min="1" max="8" value="3" />
+            <input id="atMaxPos" type="number" min="1" max="8" value="4" />
           </label>
           <label>حداقل احتمال پیشنهاد
             <input id="atMinOdds" type="number" min="40" max="78" value="50" />
           </label>
           <div class="autotrade-actions">
-            <button type="button" class="alert-arm-btn" id="atSaveBtn">ذخیره تنظیمات</button>
-            <button type="button" class="alert-test-btn" id="atTestBtn">تست اتصال</button>
-            <button type="button" class="alert-test-btn" id="atRunBtn">یک دور اجرا الان</button>
-            <button type="button" class="alert-test-btn" id="atRefreshBtn">بروزرسانی وضعیت</button>
+            <button type="button" class="alert-test-btn" id="atSaveBtn">ذخیره تنظیمات</button>
+            <button type="button" class="alert-test-btn" id="atRunBtn">یک دور الان</button>
           </div>
           <p class="hint" id="atHint">
-            کارمزد/اسپرد از خود MT5 خوانده می‌شود (در دمو اغلب اسپرد فعال است، کمیسیون ممکن است صفر باشد).
-            برای اجرای مداوم روی ویندوز: <code>pip install MetaTrader5</code> سپس <code>python -m app.trading.worker</code>
+            روی لینوکس: MT5 را با Wine نصب/باز کن، Algo Trading را در ترمینال روشن کن، بعد از همین صفحه Start بزن.
+            اسپرد/کمیسیون از خود MT5 خوانده می‌شود.
           </p>
-          <p class="warn">رمز را در چت عمومی نفرست. اگر اینجا فرستادی، در کابین آلپاری عوضش کن.</p>
         </div>
         <div class="autotrade-status" id="atStatusBox">
           <p class="muted">وضعیت هنوز بارگذاری نشده.</p>
@@ -496,6 +499,6 @@
   </div>
 
   <div class="toast" id="toast" hidden></div>
-  <script src="/static/js/app.js?v=signal12"></script>
+  <script src="/static/js/app.js?v=signal13"></script>
 </body>
 </html>

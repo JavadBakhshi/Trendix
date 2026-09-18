@@ -14,11 +14,11 @@ DEFAULTS = {
     "password": "",
     "server": "Alpari-MT5-Demo",
     "terminal_path": "",
-    "mode": "intraday",  # scalping | intraday | swing
-    "risk_percent": 0.5,
-    "max_positions": 3,
+    "mode": "scalping",  # scalping | intraday | swing
+    "risk_percent": 0.4,
+    "max_positions": 4,
     "min_odds": 50,
-    "cooldown_sec": 180,
+    "cooldown_sec": 90,
     "magic": 260918,
     "only_alert_tiers": ["high_conviction", "strong", "moderate"],
 }

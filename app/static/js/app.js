@@ -1143,16 +1143,24 @@ async function loadAutotrade() {
     if ($("atLogin") && !$("atLogin").value) $("atLogin").value = cfg.login || "";
     if ($("atServer")) $("atServer").value = cfg.server || "Alpari-MT5-Demo";
     if ($("atPath") && cfg.terminal_path) $("atPath").value = cfg.terminal_path;
-    if ($("atMode")) $("atMode").value = cfg.mode || "intraday";
-    if ($("atRisk")) $("atRisk").value = cfg.risk_percent ?? 0.5;
-    if ($("atMaxPos")) $("atMaxPos").value = cfg.max_positions ?? 3;
+    if ($("atMode")) $("atMode").value = cfg.mode || "scalping";
+    if ($("atRisk")) $("atRisk").value = cfg.risk_percent ?? 0.4;
+    if ($("atMaxPos")) $("atMaxPos").value = cfg.max_positions ?? 4;
     if ($("atMinOdds")) $("atMinOdds").value = cfg.min_odds ?? 50;
     const acc = data.account || (data.connection && data.connection.account);
+    const sch = data.scheduler || {};
     const lines = [
-      `<p><b>کتابخانه MT5:</b> ${data.mt5_library ? "نصب است" : "نیست (روی این سیستم معامله اجرا نمی‌شود)"}</p>`,
-      `<p><b>ذخیره رمز:</b> ${cfg.has_password ? "بله (محلی)" : "خیر"} · مسیر: <code>${cfg.store_path || "—"}</code></p>`,
+      `<p><b>حلقه داخل برنامه:</b> ${sch.loop_alive ? "فعال" : "خاموش"} · `
+        + `اسکالپینگ: ${cfg.enabled ? (sch.running ? "در حال کار" : "منتظر دور بعد") : "متوقف"}</p>`,
+      `<p><b>کتابخانه MT5:</b> ${data.mt5_library ? "نصب است" : "نیست — روی لینوکس باید MetaTrader5 + Wine/ترمینال نصب باشد"}</p>`,
+      `<p><b>ذخیره رمز:</b> ${cfg.has_password ? "بله (محلی)" : "خیر"}</p>`,
       data.note ? `<p class="muted">${data.note}</p>` : "",
+      sch.last_at ? `<p class="muted">آخرین دور: ${new Date(sch.last_at * 1000).toLocaleString("fa-IR")} · معاملات این دور: ${sch.last_placed || 0}</p>` : "",
+      sch.last_error ? `<p class="warn">${sch.last_error}</p>` : "",
+      sch.last_headline ? `<p>${sch.last_headline}</p>` : "",
     ];
+    if ($("atStartBtn")) $("atStartBtn").classList.toggle("on", !!cfg.enabled);
+    if ($("atMode") && !cfg.mode) $("atMode").value = "scalping";
     if (acc) {
       lines.push(
         `<p><b>اکانت:</b> ${acc.login} @ ${acc.server} · موجودی ${Number(acc.balance).toFixed(2)} ${acc.currency} · `
@@ -1255,6 +1263,39 @@ async function testAutotrade() {
   const body = await res.json().catch(() => ({}));
   if (body.ok) toast(`وصل شد · equity ${(body.account && body.account.equity) || "—"}`);
   else toast(body.error || "اتصال ناموفق");
+  await loadAutotrade();
+}
+
+async function startAutotradeScalp() {
+  if ($("atMode")) $("atMode").value = "scalping";
+  const payload = {
+    mode: "scalping",
+    login: ($("atLogin") && $("atLogin").value.trim()) || "",
+    password: ($("atPassword") && $("atPassword").value) || "",
+    server: ($("atServer") && $("atServer").value.trim()) || "Alpari-MT5-Demo",
+    terminal_path: ($("atPath") && $("atPath").value.trim()) || "",
+    risk_percent: Number($("atRisk") && $("atRisk").value) || 0.4,
+    max_positions: Number($("atMaxPos") && $("atMaxPos").value) || 4,
+    min_odds: Number($("atMinOdds") && $("atMinOdds").value) || 50,
+    cooldown_sec: 90,
+  };
+  const res = await fetch("/api/autotrade/start", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.detail || "شروع نشد");
+  if ($("atPassword")) $("atPassword").value = "";
+  toast("اسکالپ خودکار داخل برنامه روشن شد");
+  await loadAutotrade();
+}
+
+async function stopAutotradeScalp() {
+  const res = await fetch("/api/autotrade/stop", { method: "POST" });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.detail || "توقف نشد");
+  toast("معامله خودکار متوقف شد");
   await loadAutotrade();
 }
 
@@ -1630,6 +1671,8 @@ function bind() {
   if ($("atSaveBtn")) $("atSaveBtn").onclick = () => saveAutotradeConfig().catch((e) => toast(e.message));
   if ($("atTestBtn")) $("atTestBtn").onclick = () => testAutotrade().catch((e) => toast(e.message));
   if ($("atRunBtn")) $("atRunBtn").onclick = () => runAutotradeOnce().catch((e) => toast(e.message));
+  if ($("atStartBtn")) $("atStartBtn").onclick = () => startAutotradeScalp().catch((e) => toast(e.message));
+  if ($("atStopBtn")) $("atStopBtn").onclick = () => stopAutotradeScalp().catch((e) => toast(e.message));
   if ($("atRefreshBtn")) $("atRefreshBtn").onclick = () => loadAutotrade().catch((e) => toast(e.message));
   if ($("alertSoundOn")) {
     $("alertSoundOn").checked = state.alertSound;

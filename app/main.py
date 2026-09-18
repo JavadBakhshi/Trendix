@@ -39,6 +39,8 @@ async def _alerts_bg_refresh(extras: list[str], min_odds: int, key: str) -> None
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    from app.trading.scheduler import ensure_started, stop_loop
+
     try:
         await market.ensure_source()
     except Exception:
@@ -46,7 +48,10 @@ async def lifespan(_app: FastAPI):
     # Free hosts (e.g. Render 512MB) can OOM if we warm the full alert scan at boot.
     if os.environ.get("SKIP_ALERT_WARM", "0") != "1":
         asyncio.create_task(warm_alerts_cache())
+    # In-app scalper loop (reads enabled flag from local MT5 settings).
+    await ensure_started()
     yield
+    await stop_loop()
     await market.close()
 
 
@@ -314,9 +319,12 @@ async def news():
 @app.get("/api/autotrade/status")
 async def autotrade_status():
     from app.trading.executor import status_bundle
+    from app.trading.scheduler import loop_status
 
     try:
-        return jsonable(await status_bundle())
+        data = await status_bundle()
+        data["scheduler"] = loop_status()
+        return jsonable(data)
     except Exception as exc:
         raise HTTPException(503, str(exc)) from exc
 
@@ -325,6 +333,7 @@ async def autotrade_status():
 async def autotrade_config(payload: dict):
     """Save MT5 settings locally (password never returned in clear text)."""
     from app.trading.secrets import save
+    from app.trading.scheduler import ensure_started
 
     allowed = {
         "enabled", "login", "password", "server", "terminal_path",
@@ -338,10 +347,12 @@ async def autotrade_config(payload: dict):
     if "min_odds" in data:
         data["min_odds"] = int(max(40, min(78, int(data["min_odds"]))))
     if "cooldown_sec" in data:
-        data["cooldown_sec"] = int(max(60, min(3600, int(data["cooldown_sec"]))))
+        data["cooldown_sec"] = int(max(45, min(3600, int(data["cooldown_sec"]))))
     if "mode" in data and data["mode"] not in {"scalping", "intraday", "swing"}:
-        data["mode"] = "intraday"
-    return jsonable(save(data))
+        data["mode"] = "scalping"
+    view = save(data)
+    await ensure_started()
+    return jsonable(view)
 
 
 @app.post("/api/autotrade/test")
@@ -357,13 +368,44 @@ async def autotrade_test():
 
 @app.post("/api/autotrade/run")
 async def autotrade_run():
-    """One scan→trade cycle (for manual trigger or local worker)."""
+    """One scan→trade cycle (manual trigger from UI)."""
     from app.trading.executor import run_once
 
     try:
         return jsonable(await run_once())
     except Exception as exc:
         raise HTTPException(503, str(exc)) from exc
+
+
+@app.post("/api/autotrade/start")
+async def autotrade_start(payload: dict | None = None):
+    """Enable scalping loop inside the web app (no separate file)."""
+    from app.trading.secrets import load, save
+    from app.trading.scheduler import ensure_started, loop_status
+
+    payload = payload or {}
+    cfg = load()
+    updates = {
+        "enabled": True,
+        "mode": payload.get("mode") or cfg.get("mode") or "scalping",
+    }
+    for key in ("login", "password", "server", "terminal_path", "risk_percent", "max_positions", "min_odds", "cooldown_sec"):
+        if key in payload and payload[key] not in (None, ""):
+            updates[key] = payload[key]
+    if updates.get("mode") not in {"scalping", "intraday", "swing"}:
+        updates["mode"] = "scalping"
+    view = save(updates)
+    await ensure_started()
+    return jsonable({"ok": True, "config": view, "scheduler": loop_status()})
+
+
+@app.post("/api/autotrade/stop")
+async def autotrade_stop():
+    from app.trading.secrets import save
+    from app.trading.scheduler import loop_status
+
+    view = save({"enabled": False})
+    return jsonable({"ok": True, "config": view, "scheduler": loop_status()})
 
 
 def jsonable(value):

@@ -213,8 +213,8 @@ async def status_bundle() -> dict:
         "config": cfg,
         "log": read_trade_log(40),
         "note": (
-            "معامله خودکار روی سرور ابری Render معمولاً کار نمی‌کند؛ "
-            "باید Trendix را روی همان سیستمی که MT5 آلپاری باز است اجرا کنی."
+            "حلقه اسکالپ داخل خود وب‌اپ می‌چرخد (منوی معامله خودکار). "
+            "روی لینوکس به ترمینال MT5 با Wine و روشن بودن Algo Trading نیاز داری."
         ),
     }
     if not cfg.get("enabled") or not cfg.get("has_password"):
