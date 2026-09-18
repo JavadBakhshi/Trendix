@@ -85,25 +85,43 @@ docker run --rm -p 8080:8000 -e PORT=8000 trendix
 4. اسکن حدود هر ۲۰ ثانیه خودش تازه می‌شود؛ نیازی به رفرش صفحه نیست
 5. اولین اسکن بعد از استارت ممکن است حدود یک دقیقه طول بکشد؛ اسکن‌های بعدی از کش می‌آیند و سریع‌اند
 
-## استقرار رایگان
+## استقرار رایگان روی Render
 
-فایل‌های `Dockerfile` و `Procfile` داخل ریپو هستند.
+بهترین گزینهٔ رایگان فعلی برای این پروژه **Render Free Web Service** است (Hugging Face Docker دیگر برای اکانت رایگان در دسترس نیست).
 
-### Hugging Face Spaces (پیشنهادی)
+### یک‌کلیکی (پیشنهادی)
 
-1. در [huggingface.co](https://huggingface.co) یک Space جدید بسازید
-2. SDK را **Docker** بگذارید
-3. این ریپو را وصل کنید یا فایل‌ها را آپلود کنید
-4. بعد از بیلد، آدرس عمومی شبیه `https://USERNAME-trendix.hf.space` می‌آید
+1. کد روی GitHub باشد: `https://github.com/JavadBakhshi/Trendix`
+2. این لینک را باز کن و با GitHub وارد Render شو:
 
-پلن رایگان ممکن است بعد از بی‌استفاده بودن بخوابد؛ اولین باز شدن کمی طول می‌کشد.
+   [Deploy to Render](https://render.com/deploy?repo=https://github.com/JavadBakhshi/Trendix)
 
-### Render
+3. پلن را **Free** بگذار و Create Web Service را بزن
+4. بعد از بیلد، آدرس عمومی شبیه این می‌آید: `https://trendix.onrender.com`
 
-1. ریپو را به [render.com](https://render.com) وصل کنید
-2. نوع سرویس: **Web Service**
-3. Build: `pip install -r requirements.txt`
-4. Start: `python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT`
+### دستی از داشبورد
+
+1. [dashboard.render.com](https://dashboard.render.com) → New → Web Service
+2. ریپوی `JavadBakhshi/Trendix` را وصل کن
+3. تنظیمات:
+   - **Runtime:** Python 3
+   - **Build:** `pip install -r requirements.txt`
+   - **Start:** `python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT`
+   - **Plan:** Free
+   - **Health check:** `/api/health`
+4. متغیر محیطی اختیاری: `SKIP_ALERT_WARM=1` (برای جلوگیری از فشار حافظه روی پلن رایگان)
+
+### محدودیت پلن رایگان
+
+- بعد از حدود ۱۵ دقیقه بدون ترافیک، سرویس می‌خوابد؛ اولین درخواست بعدی حدود ۱ دقیقه طول می‌کشد
+- رم حدود ۵۱۲MB است؛ اسکن هشدار ممکن است کمی کند باشد
+- ماهانه سقف ساعت/پهنای‌باند دارد
+
+فایل‌های `render.yaml` و `runtime.txt` داخل ریپو همین دیپلوی را خودکار می‌کنند.
+
+### Hugging Face Spaces
+
+SDK داکر دیگر برای اکانت رایگان/بدون PRO در دسترس نیست. اگر PRO داری می‌توانی با Docker Space روی پورت ۷۸۶۰ دیپلوی کنی؛ در غیر این صورت Render را استفاده کن.
 
 ## متغیرهای محیطی
 
@@ -112,6 +130,7 @@ docker run --rm -p 8080:8000 -e PORT=8000 trendix
 | `PORT` | `8000` | پورت HTTP |
 | `HOST` | `127.0.0.1` اگر `PORT` ست نشده؛ وگرنه `0.0.0.0` | آدرس bind |
 | `RELOAD` | `1` روی localhost، وگرنه `0` | ری‌لود خودکار uvicorn |
+| `SKIP_ALERT_WARM` | `0` | اگر `1` باشد، اسکن اولیهٔ هشدار موقع استارت اجرا نمی‌شود (مناسب پلن رایگان) |
 
 ## API
 

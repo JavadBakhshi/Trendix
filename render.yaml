@@ -1,0 +1,20 @@
+# Render Blueprint — free web service
+# Docs: https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: trendix
+    runtime: python
+    plan: free
+    region: oregon
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      - key: HOST
+        value: "0.0.0.0"
+      - key: RELOAD
+        value: "0"
+      - key: SKIP_ALERT_WARM
+        value: "1"

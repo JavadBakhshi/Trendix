@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import os
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -42,7 +43,9 @@ async def lifespan(_app: FastAPI):
         await market.ensure_source()
     except Exception:
         pass
-    asyncio.create_task(warm_alerts_cache())
+    # Free hosts (e.g. Render 512MB) can OOM if we warm the full alert scan at boot.
+    if os.environ.get("SKIP_ALERT_WARM", "0") != "1":
+        asyncio.create_task(warm_alerts_cache())
     yield
     await market.close()
 
